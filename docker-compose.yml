@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  aegisdns:
+    build: .
+    container_name: aegisdns
+    restart: unless-stopped
+    
+    # CRITICAL: We use host networking so that AegisDNS can correctly see 
+    # the true IP address of the client (e.g., your Tailscale IP). 
+    # If we use port forwarding (ports: 53:53), every query will appear 
+    # to come from the Docker internal gateway IP (172.x.x.x), 
+    # completely breaking per-device policies and dashboard tracking.
+    network_mode: "host"
+    
+    # Mount persistent storage for policies and analytics
+    volumes:
+      - aegisdns_data:/var/lib/aegisdns
+
+    # Required privileges for a DNS server binding to system ports
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+
+volumes:
+  aegisdns_data:
