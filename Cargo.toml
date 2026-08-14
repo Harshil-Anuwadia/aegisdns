@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/daemon",
+    "crates/resolver",
+    "crates/config",
+    "crates/policy",
+    "crates/blocklist",
+    "crates/analytics",
+    "crates/diagnostics",
+    "crates/fallback",
+    "crates/risk"
+]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.32", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+interprocess = "1.2" # For IPC (Unix domain sockets)
+toml = "0.8"
+reqwest = { version = "0.11", features = ["json"] }
+rustrus = "0.1"
+async-trait = "0.1"
+nix = "0.27"
+thiserror = "1.0"

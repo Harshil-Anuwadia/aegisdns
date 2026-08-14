@@ -1,0 +1,12 @@
+[package]
+name = "diagnostics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+policy = { path = "../policy" }
+blocklist = { path = "../blocklist" }
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
