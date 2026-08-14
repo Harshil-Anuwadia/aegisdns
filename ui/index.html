@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AegisDNS</title>
+  <meta name="description" content="AegisDNS — Self-hosted network-wide DNS filtering">
+  <link rel="stylesheet" href="index.css?v=2">
+</head>
+<body>
+<div class="app-container">
+
+  <!-- ── Sidebar ── -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Aegis<span class="accent">DNS</span>
+    </div>
+    <ul class="sidebar-nav">
+      <li><a href="#" class="nav-link active" data-view="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Dashboard
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="policy">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Policy Rules
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="blocklists">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3" cy="6" r="1" fill="currentColor"/><circle cx="3" cy="12" r="1" fill="currentColor"/><circle cx="3" cy="18" r="1" fill="currentColor"/></svg>
+        Blocklists
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="schedules">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Schedules
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="tools">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93a10 10 0 0 1 14.14 14.14"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
+        Tools
+      </a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <div class="status-indicator">
+        <span class="status-dot"></span>
+        DNS Active
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── Main ── -->
+  <div class="main-wrap">
+
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="mobile-logo">Aegis<span class="accent">DNS</span></span>
+        <span class="page-title" id="page-title">Dashboard</span>
+      </div>
+      <div class="topbar-right">
+        <div class="device-select-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          <select id="device-selector" title="Filter by device">
+            <option value="">All Devices</option>
+          </select>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          Active
+        </div>
+      </div>
+    </header>
+
+    <!-- Views -->
+    <main class="view-container">
+
+      <!-- ═══ DASHBOARD ═══ -->
+      <div id="view-dashboard" class="view active">
+
+        <!-- My Device Banner -->
+        <div class="my-device-banner" id="my-device-banner" style="display:none">
+          <div class="banner-left">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+            <div>
+              <div class="banner-label">Viewing stats for your device</div>
+              <div class="banner-ip" id="my-device-ip"></div>
+            </div>
+          </div>
+          <span class="banner-tag">Your Device</span>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Queries Today</div>
+            <div class="stat-value val-blue" id="stat-queries">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Blocked Today</div>
+            <div class="stat-value val-red" id="stat-blocked">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Block Rate</div>
+            <div class="stat-value val-yellow" id="stat-rate">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Avg Latency</div>
+            <div class="stat-value val-green"><span id="stat-latency">—</span><span class="stat-unit"> ms</span></div>
+          </div>
+        </div>
+
+        <div class="info-strip">
+          <div class="strip-card threat-card">
+            <div>
+              <div class="strip-label">Live Threats</div>
+              <div class="strip-value red" id="stat-threats">0</div>
+            </div>
+            <div>
+              <div class="strip-label">Last Updated</div>
+              <div class="strip-sub" id="threat-updated">Pending</div>
+            </div>
+          </div>
+          <div class="strip-card">
+            <div>
+              <div class="strip-label">Safe Search</div>
+              <div class="strip-sub">Force strict mode on Google, YouTube, Bing, DuckDuckGo</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="safesearch-toggle" onchange="toggleSafeSearch()">
+              <span class="toggle-track"></span>
+              <span class="toggle-label" id="safesearch-label">Off</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="two-col" style="margin-bottom:1rem">
+          <div class="panel">
+            <div class="panel-head"><h2>Top Requested Domains</h2></div>
+            <div class="d-list" id="list-top-domains"><div class="empty-state">Loading…</div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Top Blocked Domains</h2></div>
+            <div class="d-list" id="list-top-blocked"><div class="empty-state">Loading…</div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Active Blocklists</h2></div>
+          <div class="d-list" id="list-blocklists-dash"><div class="empty-state">Loading…</div></div>
+        </div>
+      </div>
+
+      <!-- ═══ POLICY RULES ═══ -->
+      <div id="view-policy" class="view">
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-head"><h2>Add Rule</h2></div>
+          <div class="panel-body">
+            <div class="inline-form">
+              <select id="policy-device" class="form-select" style="max-width:200px">
+                <option value="">Global — All Devices</option>
+              </select>
+              <input type="text" id="policy-input" class="form-input" placeholder="example.com">
+              <button class="btn btn-allow" onclick="submitPolicy('allow')">Allow</button>
+              <button class="btn btn-deny" onclick="submitPolicy('deny')">Deny</button>
+            </div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-head"><h2>Allowed Domains</h2></div>
+            <div class="d-list" id="list-allowed"><div class="empty-state">Loading…</div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Denied Domains</h2></div>
+            <div class="d-list" id="list-denied"><div class="empty-state">Loading…</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ BLOCKLISTS ═══ -->
+      <div id="view-blocklists" class="view">
+        <div class="panel">
+          <div class="panel-head"><h2>Managed Blocklists</h2></div>
+          <table class="bl-table" id="tbl-blocklists">
+            <thead><tr><th>Status</th><th>Name</th><th>Rules</th></tr></thead>
+            <tbody><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ═══ SCHEDULES ═══ -->
+      <div id="view-schedules" class="view">
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-head"><h2>Create Schedule</h2></div>
+          <div class="panel-body">
+            <div class="form-grid" style="margin-bottom:.85rem">
+              <div class="form-group">
+                <label class="form-label">Domain</label>
+                <input type="text" id="sched-domain" class="form-input" placeholder="tiktok.com">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Action</label>
+                <select id="sched-action" class="form-select">
+                  <option value="block">Block</option>
+                  <option value="allow">Allow</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Device</label>
+                <select id="sched-device" class="form-select">
+                  <option value="">Global — All Devices</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Time Window</label>
+                <div class="time-range-wrap">
+                  <input type="time" id="sched-start" class="form-input" value="22:00">
+                  <span>to</span>
+                  <input type="time" id="sched-end" class="form-input" value="06:00">
+                </div>
+              </div>
+              <div class="form-group" style="grid-column:1/-1">
+                <label class="form-label">Days</label>
+                <div class="days-wrap">
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="1" checked><span>Mon</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="2" checked><span>Tue</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="3" checked><span>Wed</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="4" checked><span>Thu</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="5" checked><span>Fri</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="6"><span>Sat</span></label>
+                  <label class="day-chip"><input type="checkbox" name="sched-day" value="0"><span>Sun</span></label>
+                </div>
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="submitSchedule()">Create Schedule</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Active Schedules</h2></div>
+          <div class="d-list" id="list-schedules"><div class="empty-state">Loading…</div></div>
+        </div>
+      </div>
+
+      <!-- ═══ TOOLS ═══ -->
+      <div id="view-tools" class="view">
+        <div class="three-col">
+          <div class="panel">
+            <div class="panel-head"><h2>Diagnostics</h2></div>
+            <div class="panel-desc">Check why a domain is allowed or blocked.</div>
+            <div class="panel-body">
+              <div class="inline-form">
+                <input type="text" id="diag-input" class="form-input" placeholder="example.com">
+                <button class="btn btn-primary" onclick="submitDiagnose()">Test</button>
+              </div>
+              <div id="diag-result" class="result-box" hidden></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Risk Analysis</h2></div>
+            <div class="panel-desc">Heuristic check for phishing and malware domains.</div>
+            <div class="panel-body">
+              <div class="inline-form">
+                <input type="text" id="risk-input" class="form-input" placeholder="suspicious-site.tk">
+                <button class="btn btn-warn" onclick="submitRiskCheck()">Analyze</button>
+              </div>
+              <div id="risk-result" class="result-box" hidden></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Fallback Override</h2></div>
+            <div class="panel-desc">Bypass filtering for a broken domain temporarily.</div>
+            <div class="panel-body">
+              <div class="inline-form">
+                <input type="text" id="fallback-input" class="form-input" placeholder="broken-site.com">
+                <button class="btn btn-warn" onclick="submitFallback()">Enable</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ── Mobile Tab Bar ── -->
+  <nav class="mobile-tabbar">
+    <a href="#" class="tab-link active" data-view="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Home
+    </a>
+    <a href="#" class="tab-link" data-view="policy">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Policy
+    </a>
+    <a href="#" class="tab-link" data-view="schedules">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Schedules
+    </a>
+    <a href="#" class="tab-link" data-view="tools">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93a10 10 0 0 1 14.14 14.14"/></svg>
+      Tools
+    </a>
+  </nav>
+
+</div>
+<div id="_toast"></div>
+<script src="app.js?v=3"></script>
+</body>
+</html>
