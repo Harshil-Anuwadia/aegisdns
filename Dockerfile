@@ -1,7 +1,7 @@
 # ---------------------------------------------------
 # Stage 1: Build the Rust Binary
 # ---------------------------------------------------
-FROM rust:1.76-slim-bullseye AS builder
+FROM rust:slim-bullseye AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y pkg-config libssl-dev clang && rm -rf /var/lib/apt/lists/*
@@ -29,7 +29,7 @@ WORKDIR /app
 
 # Copy binaries from builder
 COPY --from=builder /usr/src/aegisdns/target/release/aegisdnsd /usr/local/bin/aegisdnsd
-COPY --from=builder /usr/src/aegisdns/target/release/aegis /usr/local/bin/aegis
+
 
 # Copy Web Dashboard UI
 RUN mkdir -p /usr/share/aegisdns/ui

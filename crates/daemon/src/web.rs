@@ -17,6 +17,8 @@ use fallback::{FallbackEngine, FallbackMode};
 use diagnostics::{DiagnosticEngine, DiagnosticReport};
 use risk::score_domain;
 use std::collections::HashMap;
+use moka::future::Cache;
+use std::time::Instant;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -25,6 +27,8 @@ struct AppState {
     policy: Arc<RwLock<PolicyEngine>>,
     blocklist: Arc<RwLock<BlocklistManager>>,
     fallback: Arc<RwLock<FallbackEngine>>,
+    anomaly: Arc<crate::anomaly::AnomalyDetector>,
+    cache: Cache<(String, u16), (Vec<u8>, Instant)>,
 }
 
 pub async fn start_web_server(
@@ -32,12 +36,16 @@ pub async fn start_web_server(
     policy: Arc<RwLock<PolicyEngine>>,
     blocklist: Arc<RwLock<BlocklistManager>>,
     fallback: Arc<RwLock<FallbackEngine>>,
+    anomaly: Arc<crate::anomaly::AnomalyDetector>,
+    cache: Cache<(String, u16), (Vec<u8>, Instant)>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         analytics,
         policy,
         blocklist,
         fallback,
+        anomaly,
+        cache,
     };
 
     let app = Router::new()
@@ -45,6 +53,8 @@ pub async fn start_web_server(
         .route("/api/top-domains", get(get_top_domains))
         .route("/api/top-blocked", get(get_top_blocked))
         .route("/api/lists", get(get_lists))
+        .route("/api/blocklists", post(post_blocklist))
+        .route("/api/blocklists/:name", delete(delete_blocklist))
         .route("/api/allow", post(post_allow))
         .route("/api/deny", post(post_deny))
         .route("/api/fallback", post(post_fallback))
@@ -53,6 +63,7 @@ pub async fn start_web_server(
         .route("/api/policy/remove", post(post_policy_remove))
         .route("/api/devices", get(get_devices))
         .route("/api/schedules", get(get_schedules))
+        .route("/api/logs", delete(delete_logs))
         .route("/api/schedules", post(post_schedule))
         .route("/api/schedules/:id", delete(delete_schedule))
         .route("/api/schedules/:id/toggle", put(put_schedule_toggle))
@@ -61,6 +72,12 @@ pub async fn start_web_server(
         .route("/api/safesearch", post(post_safesearch))
         .route("/api/me", get(get_my_ip))
         .route("/api/threats", get(get_threat_status))
+        .route("/api/quarantine", get(get_quarantine))
+        .route("/api/quarantine/:ip", delete(delete_quarantine))
+        .route("/api/actions", get(get_actions))
+        .route("/api/actions", post(post_action))
+        .route("/api/actions/:domain", delete(delete_action))
+        .route("/api/actions/logs", get(get_action_logs).delete(clear_action_logs))
         .route("/blocked", get(get_blocked_page))
         .route("/logo.png", get(get_logo))
         .fallback_service(ServeDir::new("/usr/share/aegisdns/ui"))
@@ -83,6 +100,7 @@ async fn get_my_ip(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Json<MyIp> {
 }
 
 pub async fn start_block_page_server(
+    analytics: Arc<analytics::AnalyticsDb>,
     policy: Arc<RwLock<policy::PolicyEngine>>,
     blocklist: Arc<RwLock<blocklist::BlocklistManager>>,
 ) -> anyhow::Result<()> {
@@ -90,10 +108,100 @@ pub async fn start_block_page_server(
     
     let app = Router::new()
         .route("/logo.png", get(get_logo))
-        .fallback(get(move |Host(host): Host| {
+        .fallback(get(move |Host(host): Host, axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>, headers: axum::http::HeaderMap| {
             let policy = policy.clone();
             let blocklist = blocklist.clone();
+            let analytics = analytics.clone();
             async move {
+                let host_no_port = host.split(':').next().unwrap_or(&host);
+                if let Some(action) = crate::actions::get_action_for_domain_db(host_no_port, &analytics) {
+                    
+                    // Token verification
+                    if let Some(expected_token) = &action.token {
+                        let provided_token = params.get("token").map(|s| s.as_str())
+                            .or_else(|| headers.get("authorization").and_then(|h| h.to_str().ok()).map(|s| s.strip_prefix("Bearer ").unwrap_or(s)))
+                            .map(|s| s.to_string());
+                        
+                        if provided_token.as_deref() != Some(expected_token.as_str()) {
+                            analytics.log_action(&action.domain, "failed", Some("Unauthorized: Invalid or missing token"));
+                            return Html(r#"<html><body style="background:#0f0f14; color:#ff0000; text-align:center; padding-top:20%; font-family: sans-serif;">
+                               <h1>â›” Unauthorized</h1>
+                               </body></html>"#.to_string());
+                        }
+                    }
+
+                    let mut outcome = "success".to_string();
+                    let mut detail = None;
+
+                    match action.action_type.as_str() {
+                        "webhook" => {
+                            if let Some(mut url) = action.payload_url {
+                                // Dynamic variable injection for webhook URL
+                                for (k, v) in &params {
+                                    url = url.replace(&format!("{{{}}}", k), v);
+                                }
+                                let method = action.method.clone().unwrap_or_else(|| "GET".to_string());
+                                let domain_clone = action.domain.clone();
+                                let analytics_clone = analytics.clone();
+                                tokio::spawn(async move {
+                                    let client = reqwest::Client::new();
+                                    let req = if method.to_uppercase() == "POST" { client.post(&url) } else { client.get(&url) };
+                                    match req.send().await {
+                                        Ok(res) => analytics_clone.log_action(&domain_clone, "success", Some(&format!("Status: {}", res.status()))),
+                                        Err(e) => analytics_clone.log_action(&domain_clone, "failed", Some(&e.to_string())),
+                                    }
+                                });
+                                detail = Some("Webhook triggered in background".to_string());
+                            }
+                        }
+                        "shell" => {
+                            if let Some(mut cmd) = action.shell_command {
+                                // Dynamic variable injection for shell
+                                for (k, v) in &params {
+                                    // simple sanitization to prevent basic injection
+                                    let safe_v = v.replace("'", "").replace("\"", "").replace(";", "").replace("&", "");
+                                    cmd = cmd.replace(&format!("{{{}}}", k), &safe_v);
+                                }
+                                let domain_clone = action.domain.clone();
+                                let analytics_clone = analytics.clone();
+                                tokio::spawn(async move {
+                                    #[cfg(unix)]
+                                    let mut child = tokio::process::Command::new("sh").arg("-c").arg(&cmd).spawn().expect("Failed to spawn");
+                                    #[cfg(windows)]
+                                    let mut child = tokio::process::Command::new("cmd").arg("/C").arg(&cmd).spawn().expect("Failed to spawn");
+                                    
+                                    match child.wait().await {
+                                        Ok(status) => analytics_clone.log_action(&domain_clone, "success", Some(&format!("Exit: {}", status))),
+                                        Err(e) => analytics_clone.log_action(&domain_clone, "failed", Some(&e.to_string())),
+                                    }
+                                });
+                                detail = Some("Shell command spawned".to_string());
+                            }
+                        }
+                        "html" => {
+                            if let Some(file) = action.html_content {
+                                analytics.log_action(&action.domain, "success", Some("Served static HTML"));
+                                return Html(file); // Assume the user put the actual HTML in the DB, not a file path for this advanced version
+                            }
+                        }
+                        _ => {
+                            outcome = "failed".to_string();
+                            detail = Some("Unknown action type".to_string());
+                        }
+                    }
+
+                    if detail.is_none() && outcome == "success" {
+                        analytics.log_action(&action.domain, &outcome, Some("Action triggered successfully"));
+                    }
+
+                    let msg = action.success_msg.unwrap_or_else(|| "Action Executed Successfully!".to_string());
+                    return Html(format!(
+                        r#"<html><body style="background:#0f0f14; color:#00ff00; text-align:center; padding-top:20%; font-family: sans-serif;">
+                           <h1>âœ… {}</h1>
+                           </body></html>"#, msg
+                    ));
+                }
+
                 let pol = policy.read().await;
                 let bl = blocklist.read().await;
                 let diag = diagnostics::DiagnosticEngine::diagnose(&host, &pol, &bl);
@@ -236,6 +344,99 @@ async fn get_lists(State(state): State<AppState>) -> Json<Vec<ListInfo>> {
 }
 
 #[derive(Deserialize)]
+struct BlocklistCreateRequest {
+    name: String,
+    source_url: String,
+}
+
+async fn post_blocklist(State(state): State<AppState>, Json(req): Json<BlocklistCreateRequest>) -> Json<ActionResponse> {
+    let new_list = blocklist::ListMetadata {
+        name: req.name.clone(),
+        source_url: req.source_url.clone(),
+        last_updated: None,
+        checksum: None,
+        enabled: true,
+        rule_count: 0,
+    };
+    
+    let blocklist_arc = state.blocklist.clone();
+    let updated_lists = {
+        let mut bl = blocklist_arc.write().await;
+        bl.lists.push(new_list);
+        
+        let config_dir = config::paths::get_data_dir();
+        let lists_path = config_dir.join("blocklists.json");
+        let _ = std::fs::create_dir_all(&config_dir);
+        if let Ok(json) = serde_json::to_string_pretty(&bl.lists) {
+            let _ = std::fs::write(&lists_path, json);
+        }
+        
+        bl.lists.clone()
+    };
+    
+    // Spawn task to download and apply lists
+    tokio::spawn(async move {
+        match BlocklistManager::download_lists(updated_lists).await {
+            Ok((new_lists, new_compiled)) => {
+                let mut bl = blocklist_arc.write().await;
+                bl.apply_update(new_lists, new_compiled);
+            }
+            Err(e) => {
+                tracing::error!("Failed to update blocklists: {}", e);
+            }
+        }
+    });
+    
+    Json(ActionResponse {
+        success: true,
+        message: format!("Blocklist '{}' added and download started", req.name),
+    })
+}
+
+async fn delete_blocklist(State(state): State<AppState>, Path(name): Path<String>) -> Json<ActionResponse> {
+    let blocklist_arc = state.blocklist.clone();
+    let updated_lists = {
+        let mut bl = blocklist_arc.write().await;
+        let original_len = bl.lists.len();
+        bl.lists.retain(|l| l.name != name);
+        
+        if bl.lists.len() == original_len {
+            return Json(ActionResponse {
+                success: false,
+                message: format!("Blocklist '{}' not found", name),
+            });
+        }
+        
+        let config_dir = config::paths::get_data_dir();
+        let lists_path = config_dir.join("blocklists.json");
+        let _ = std::fs::create_dir_all(&config_dir);
+        if let Ok(json) = serde_json::to_string_pretty(&bl.lists) {
+            let _ = std::fs::write(&lists_path, json);
+        }
+        
+        bl.lists.clone()
+    };
+    
+    // Spawn task to re-compile lists
+    tokio::spawn(async move {
+        match BlocklistManager::download_lists(updated_lists).await {
+            Ok((new_lists, new_compiled)) => {
+                let mut bl = blocklist_arc.write().await;
+                bl.apply_update(new_lists, new_compiled);
+            }
+            Err(e) => {
+                tracing::error!("Failed to update blocklists: {}", e);
+            }
+        }
+    });
+
+    Json(ActionResponse {
+        success: true,
+        message: format!("Blocklist '{}' deleted", name),
+    })
+}
+
+#[derive(Deserialize)]
 struct DomainRequest {
     domain: String,
     device_id: Option<String>,
@@ -259,6 +460,7 @@ async fn post_allow(State(state): State<AppState>, Json(req): Json<DomainRequest
         let _ = p.save();
     }
     let _ = state.analytics.set_policy_rule(&domain, "allow");
+    state.cache.invalidate_all();
     Json(ActionResponse {
         success: true,
         message: format!("Allowed {}", domain),
@@ -277,6 +479,7 @@ async fn post_deny(State(state): State<AppState>, Json(req): Json<DomainRequest>
         let _ = p.save();
     }
     let _ = state.analytics.set_policy_rule(&domain, "deny");
+    state.cache.invalidate_all();
     Json(ActionResponse {
         success: true,
         message: format!("Blocked {}", domain),
@@ -295,6 +498,7 @@ async fn post_policy_remove(State(state): State<AppState>, Json(req): Json<Domai
         let _ = p.save();
     }
     let _ = state.analytics.remove_policy_rule(&domain);
+    state.cache.invalidate_all();
     Json(ActionResponse {
         success: true,
         message: format!("Removed rule for {}", domain),
@@ -680,5 +884,110 @@ async fn get_threat_status(State(state): State<AppState>) -> Json<ThreatStatus> 
     })
 }
 
+async fn get_quarantine(State(s): State<AppState>) -> Json<Vec<String>> {
+    let q = s.anomaly.quarantined.read().await;
+    Json(q.iter().cloned().collect())
+}
 
+async fn delete_quarantine(State(s): State<AppState>, Path(ip): Path<String>) -> axum::http::StatusCode {
+    s.anomaly.unquarantine(&ip).await;
+    axum::http::StatusCode::OK
+}
 
+#[derive(Deserialize)]
+struct DeleteLogsRequest {
+    timeframe: String,
+}
+
+async fn delete_logs(State(state): State<AppState>, Json(req): Json<DeleteLogsRequest>) -> Json<ActionResponse> {
+    match state.analytics.delete_logs(&req.timeframe).await {
+        Ok(_) => Json(ActionResponse {
+            success: true,
+            message: "Logs deleted successfully".into(),
+        }),
+        Err(e) => Json(ActionResponse {
+            success: false,
+            message: format!("Failed to delete logs: {}", e),
+        }),
+    }
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Custom DNS Actions Engine  â€” REST API handlers
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+#[derive(Deserialize)]
+struct CreateActionRequest {
+    domain:        String,
+    action_type:   String,
+    payload_url:   Option<String>,
+    method:        Option<String>,
+    shell_command: Option<String>,
+    html_content:  Option<String>,
+    success_msg:   Option<String>,
+    token:         Option<String>,
+}
+
+async fn get_actions(State(state): State<AppState>) -> Json<Vec<analytics::CustomAction>> {
+    Json(state.analytics.list_actions().unwrap_or_default())
+}
+
+async fn post_action(
+    State(state): State<AppState>,
+    Json(req): Json<CreateActionRequest>,
+) -> Json<ActionResponse> {
+    let domain = req.domain.trim().to_lowercase();
+    match state.analytics.upsert_action(
+        &domain,
+        &req.action_type,
+        req.payload_url.as_deref(),
+        req.method.as_deref(),
+        req.shell_command.as_deref(),
+        req.html_content.as_deref(),
+        req.success_msg.as_deref(),
+        req.token.as_deref(),
+    ) {
+        Ok(_) => {
+            crate::actions::invalidate(&domain);
+            Json(ActionResponse { success: true, message: format!("Action for '{}' saved.", domain) })
+        }
+        Err(e) => Json(ActionResponse { success: false, message: e.to_string() }),
+    }
+}
+
+async fn delete_action(
+    State(state): State<AppState>,
+    Path(domain): Path<String>,
+) -> Json<ActionResponse> {
+    let domain = domain.trim().to_lowercase();
+    match state.analytics.delete_action(&domain) {
+        Ok(_) => {
+            crate::actions::invalidate(&domain);
+            Json(ActionResponse { success: true, message: format!("Action for '{}' deleted.", domain) })
+        }
+        Err(e) => Json(ActionResponse { success: false, message: e.to_string() }),
+    }
+}
+
+#[derive(Deserialize)]
+struct ActionLogsQuery {
+    domain: Option<String>,
+    limit:  Option<u32>,
+}
+
+async fn get_action_logs(
+    State(state): State<AppState>,
+    Query(q): Query<ActionLogsQuery>,
+) -> Json<Vec<analytics::ActionLog>> {
+    let limit = q.limit.unwrap_or(50).min(200);
+    Json(state.analytics.get_action_logs(q.domain.as_deref(), limit).unwrap_or_default())
+}
+
+async fn clear_action_logs(
+    State(state): State<AppState>,
+) -> Json<ActionResponse> {
+    match state.analytics.clear_action_logs() {
+        Ok(_) => Json(ActionResponse { success: true, message: "Logs cleared".into() }),
+        Err(e) => Json(ActionResponse { success: false, message: e.to_string() }),
+    }
+}

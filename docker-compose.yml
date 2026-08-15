@@ -11,11 +11,26 @@ services:
     # If we use port forwarding (ports: 53:53), every query will appear 
     # to come from the Docker internal gateway IP (172.x.x.x), 
     # completely breaking per-device policies and dashboard tracking.
-    network_mode: "host"
+    # network_mode: "host" doesn't work on Windows Docker Desktop. We must map ports.
+    environment:
+      - AEGIS_HOST_IP=${AEGIS_HOST_IP:-127.0.0.1}
+
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "5380:5380/tcp"
+      - "80:80/tcp"
     
+    # Use public DNS inside the container so it can resolve external hosts
+    # (host DNS is 127.0.0.1/AegisDNS which is unreachable from inside Docker on Windows)
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
     # Mount persistent storage for policies and analytics
     volumes:
       - aegisdns_data:/var/lib/aegisdns
+      - ./config.json:/app/config.json
 
     # Required privileges for a DNS server binding to system ports
     cap_add:

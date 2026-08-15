@@ -28,6 +28,13 @@ if %ERRORLEVEL% NEQ 0 (
 echo [OK] Docker Compose is available.
 
 echo.
+:: Generate default config.json if missing
+if not exist "config.json" (
+    echo [INFO] Creating default config.json...
+    powershell -Command "$ip = (tailscale ip -4 2>$null); if ($null -eq $ip -or $ip.Trim() -eq '') { $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'Wi-Fi','Ethernet' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress | Select-Object -First 1) }; if ($null -eq $ip -or $ip.Trim() -eq '') { $ip = '127.0.0.1' }; '{`n  `"host_ips`": [`n    `"127.0.0.1`",`n    `"' + $ip.Trim() + '`"`n  ]`n}' | Out-File -FilePath config.json -Encoding ascii"
+)
+
+echo.
 echo [INFO] Building and starting AegisDNS container...
 docker compose up -d --build
 

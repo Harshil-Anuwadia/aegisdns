@@ -43,3 +43,4 @@ blocklists/
 rules/
 db/
 release_build/
+config.json

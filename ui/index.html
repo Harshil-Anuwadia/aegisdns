@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
   <title>AegisDNS</title>
   <meta name="description" content="AegisDNS — Self-hosted network-wide DNS filtering">
-  <link rel="stylesheet" href="index.css?v=2">
+  <link rel="stylesheet" href="index.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 <div class="app-container">
+  <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
 
   <!-- ── Sidebar ── -->
   <nav class="sidebar">
@@ -23,7 +25,7 @@
       </a></li>
       <li><a href="#" class="nav-link" data-view="policy">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        Policy Rules
+        Rules
       </a></li>
       <li><a href="#" class="nav-link" data-view="blocklists">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3" cy="6" r="1" fill="currentColor"/><circle cx="3" cy="12" r="1" fill="currentColor"/><circle cx="3" cy="18" r="1" fill="currentColor"/></svg>
@@ -36,6 +38,14 @@
       <li><a href="#" class="nav-link" data-view="tools">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93a10 10 0 0 1 14.14 14.14"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
         Tools
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="actions">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        Actions
+      </a></li>
+      <li><a href="#" class="nav-link" data-view="devices">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+        Network
       </a></li>
     </ul>
     <div class="sidebar-footer">
@@ -52,6 +62,7 @@
     <!-- Topbar -->
     <header class="topbar">
       <div class="topbar-left">
+        <button class="hamburger" id="hamburger-btn" onclick="toggleSidebar()" aria-label="Toggle menu"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
         <span class="mobile-logo">Aegis<span class="accent">DNS</span></span>
         <span class="page-title" id="page-title">Dashboard</span>
       </div>
@@ -130,6 +141,27 @@
           </div>
         </div>
 
+        <div class="three-col" id="dash-charts" style="margin-bottom:1rem">
+          <div class="panel">
+            <div class="panel-head"><h2>Traffic Overview</h2></div>
+            <div class="panel-body" style="position:relative; height:320px; display:flex; justify-content:center; align-items:center">
+              <canvas id="chart-traffic"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Top 5 Tech Companies</h2></div>
+            <div class="panel-body" style="position:relative; height:320px; display:flex; justify-content:center; align-items:center">
+              <canvas id="chart-tech"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Top 5 Domains</h2></div>
+            <div class="panel-body" style="position:relative; height:320px; display:flex; justify-content:center; align-items:center">
+              <canvas id="chart-domains"></canvas>
+            </div>
+          </div>
+        </div>
+
         <div class="two-col" style="margin-bottom:1rem">
           <div class="panel">
             <div class="panel-head"><h2>Top Requested Domains</h2></div>
@@ -141,8 +173,18 @@
           </div>
         </div>
 
-        <div class="panel">
-          <div class="panel-head"><h2>Active Blocklists</h2></div>
+        <div class="panel" id="dash-blocklists">
+          <div class="panel-head">
+            <h2>Active Blocklists</h2>
+            <button class="btn btn-ghost btn-sm" onclick="loadBlocklists()">↻ Refresh</button>
+          </div>
+          <div class="panel-body" style="border-bottom: 1px solid var(--border)">
+            <form class="inline-form" onsubmit="event.preventDefault(); addBlocklist()">
+              <input type="text" id="bl-name" class="form-input" placeholder="Blocklist Name (e.g. My Custom List)" required>
+              <input type="url" id="bl-url" class="form-input" placeholder="Raw URL (.txt)" required>
+              <button type="submit" class="btn btn-primary">Add List</button>
+            </form>
+          </div>
           <div class="d-list" id="list-blocklists-dash"><div class="empty-state">Loading…</div></div>
         </div>
       </div>
@@ -154,7 +196,7 @@
           <div class="panel-body">
             <div class="inline-form">
               <select id="policy-device" class="form-select" style="max-width:200px">
-                <option value="">Global — All Devices</option>
+                  <option value="">Global - All Devices</option>
               </select>
               <input type="text" id="policy-input" class="form-input" placeholder="example.com">
               <button class="btn btn-allow" onclick="submitPolicy('allow')">Allow</button>
@@ -178,10 +220,19 @@
       <div id="view-blocklists" class="view">
         <div class="panel">
           <div class="panel-head"><h2>Managed Blocklists</h2></div>
-          <table class="bl-table" id="tbl-blocklists">
-            <thead><tr><th>Status</th><th>Name</th><th>Rules</th></tr></thead>
-            <tbody><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody>
-          </table>
+          <div class="panel-body table-scroll" style="padding:0">
+            <table class="bl-table" id="tbl-blocklists">
+              <thead>
+                <tr>
+                  <th>List Name</th>
+                  <th style="width:100px">Rules</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="2" class="empty-state">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -205,7 +256,7 @@
               <div class="form-group">
                 <label class="form-label">Device</label>
                 <select id="sched-device" class="form-select">
-                  <option value="">Global — All Devices</option>
+                    <option value="">Global - All Devices</option>
                 </select>
               </div>
               <div class="form-group">
@@ -273,6 +324,103 @@
               </div>
             </div>
           </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Data Management</h2></div>
+            <div class="panel-desc">Clear your query analytics and DNS logs.</div>
+            <div class="panel-body">
+              <div class="inline-form" style="display:flex; gap:0.5rem">
+                <select id="log-timeframe" class="form-input" style="flex:1">
+                  <option value="1h">Last Hour</option>
+                  <option value="24h">Last 24 Hours</option>
+                  <option value="7d">Last 7 Days</option>
+                  <option value="all">All Logs</option>
+                </select>
+                <button class="btn btn-warn" onclick="deleteLogs()">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ AUTOMATIONS & WEBHOOKS ═══ -->
+      <div id="view-actions" class="view">
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-head"><h2>Create Custom Action</h2></div>
+          <div class="panel-body">
+            <p style="color:var(--text-muted); margin-top:0; font-size:14px;">Map a custom domain (e.g. <code>deploy.local</code>) to trigger a background script, a webhook, or serve static HTML. AegisDNS will intercept queries to this domain and execute the action instead of resolving the IP.</p>
+            <form id="form-action" onsubmit="event.preventDefault(); submitAction()">
+              <div class="inline-form" style="margin-bottom:15px; flex-wrap:wrap">
+                <input type="text" id="action-domain" class="form-input" placeholder="Domain (e.g., webhook.local)" required style="flex:1">
+                <select id="action-type" class="form-select" onchange="toggleActionFields()" style="width:150px">
+                  <option value="webhook">Webhook</option>
+                  <option value="shell">Bash Script</option>
+                  <option value="html">Static HTML</option>
+                </select>
+                <input type="text" id="action-token" class="form-input" placeholder="Auth Token (Optional)" style="width:200px">
+              </div>
+              
+              <div id="action-fields-webhook" class="action-fields">
+                <div class="inline-form" style="margin-bottom:15px">
+                  <select id="action-method" class="form-select" style="width:100px"><option>GET</option><option>POST</option></select>
+                  <input type="url" id="action-url" class="form-input" placeholder="https://api.github.com/..." style="flex:1">
+                </div>
+              </div>
+
+              <div id="action-fields-shell" class="action-fields" style="display:none">
+                <textarea id="action-cmd" class="form-input" placeholder="echo 'Hello' > /tmp/test" style="width:100%; height:80px; margin-bottom:15px; font-family:monospace" resize="vertical"></textarea>
+              </div>
+
+              <div id="action-fields-html" class="action-fields" style="display:none">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                  <span style="font-size: 13px; color: var(--text-muted);">Paste HTML code below or upload a file:</span>
+                  <input type="file" id="action-html-file" accept=".html,.htm" style="display:none;" onchange="handleHtmlFileUpload(event)">
+                  <button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById('action-html-file').click()" style="padding: 4px 8px; font-size: 12px;">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px; vertical-align: text-bottom;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    Upload .html File
+                  </button>
+                </div>
+                <textarea id="action-html" class="form-input" placeholder="<h1>Hello World</h1>" style="width:100%; height:120px; margin-bottom:15px; font-family:monospace" resize="vertical"></textarea>
+              </div>
+
+              <input type="text" id="action-success" class="form-input" placeholder="Custom Success Message (Optional)" style="width:100%; margin-bottom:15px">
+              <button type="submit" class="btn btn-primary">Save Action</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Active Automations</h2>
+              <button class="btn btn-ghost btn-sm" onclick="loadActions()">↻ Refresh</button>
+            </div>
+            <div class="d-list" id="list-actions"><div class="empty-state">Loading…</div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Execution Logs</h2>
+              <div>
+                <button class="btn btn-ghost btn-sm" onclick="clearActionLogs()" style="color:var(--red)">Clear</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadActionLogs()">↻ Refresh</button>
+              </div>
+            </div>
+            <div class="d-list" id="list-action-logs"><div class="empty-state">Loading…</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ DEVICES ═══ -->
+      <div id="view-devices" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Quarantined Devices</h2>
+            <button class="btn btn-ghost btn-sm" onclick="loadQuarantine()">↻ Refresh</button>
+          </div>
+          <div class="d-list" id="list-quarantine"><div class="empty-state">No quarantined devices.</div></div>
+        </div>
+        <div class="panel" style="margin-top:1rem">
+          <div class="panel-head"><h2>Connected Devices</h2></div>
+          <div class="d-list" id="list-devices-all"><div class="empty-state">Loading…</div></div>
         </div>
       </div>
 
@@ -287,15 +435,23 @@
     </a>
     <a href="#" class="tab-link" data-view="policy">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      Policy
+      Rules
     </a>
-    <a href="#" class="tab-link" data-view="schedules">
+    <a href="#" class="tab-link hide-mobile" data-view="schedules">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Schedules
     </a>
-    <a href="#" class="tab-link" data-view="tools">
+    <a href="#" class="tab-link" data-view="actions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      Actions
+    </a>
+    <a href="#" class="tab-link hide-mobile" data-view="tools">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93a10 10 0 0 1 14.14 14.14"/></svg>
       Tools
+    </a>
+    <a href="#" class="tab-link" data-view="devices">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      Network
     </a>
   </nav>
 

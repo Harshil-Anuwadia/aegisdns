@@ -232,33 +232,15 @@ impl PolicyEngine {
     // --- Matching ---
 
     fn matches(domain: &str, set: &HashSet<String>) -> bool {
-        if set.contains(domain) { return true; }
-        for rule in set.iter() {
-            if rule.starts_with("*.") {
-                let suffix = &rule[2..];
-                if domain.ends_with(suffix) && (domain.len() == suffix.len() || domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.') {
-                    return true;
-                }
-            } else {
-                if domain.ends_with(rule) && domain.len() > rule.len() && domain.as_bytes()[domain.len() - rule.len() - 1] == b'.' {
-                    return true;
-                }
-            }
-        }
-        false
+        config::iter_subdomains(domain).any(|sub| {
+            set.contains(sub) || set.contains(&format!("*.{}", sub))
+        })
     }
 
     fn matches_pattern(domain: &str, pattern: &str) -> bool {
         let pattern = if pattern.starts_with("www.") { &pattern[4..] } else { pattern };
-        let domain = if domain.starts_with("www.") { &domain[4..] } else { domain };
-
-        if domain == pattern { return true; }
-        if pattern.starts_with("*.") {
-            let suffix = &pattern[2..];
-            return domain.ends_with(suffix) && (domain.len() == suffix.len() || domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.');
-        }
-        // Implicit wildcard: pattern matches domain and all subdomains
-        domain.ends_with(pattern) && domain.len() > pattern.len() && domain.as_bytes()[domain.len() - pattern.len() - 1] == b'.'
+        let pattern_base = if pattern.starts_with("*.") { &pattern[2..] } else { pattern };
+        config::iter_subdomains(domain).any(|sub| sub == pattern_base)
     }
 
     fn is_typosquatting(domain: &str) -> bool {
@@ -313,6 +295,18 @@ impl PolicyEngine {
         }
         let base_domain = if domain.starts_with("www.") { &domain[4..] } else { domain };
 
+        // 1. Time-based schedule rules (highest priority)
+        for schedule in &self.schedules {
+            if schedule.is_active_now(device_id) {
+                if Self::matches_pattern(domain, &schedule.domain) || Self::matches_pattern(base_domain, &schedule.domain) {
+                    return match schedule.action {
+                        ScheduleAction::Block => PolicyDecision::Blocked(BlockReason::ScheduledBlock),
+                        ScheduleAction::Allow => PolicyDecision::Allowed(format!("Schedule: {}", schedule.label)),
+                    };
+                }
+            }
+        }
+
         // 1. Device-specific Explicit Allow
         if let Some(did) = device_id {
             if let Some(set) = self.device_explicit_allow.get(did) {
@@ -346,17 +340,7 @@ impl PolicyEngine {
             return PolicyDecision::Blocked(BlockReason::ExplicitDeny);
         }
 
-        // 6. Time-based schedule rules (checked after explicit rules)
-        for schedule in &self.schedules {
-            if schedule.is_active_now(device_id) {
-                if Self::matches_pattern(domain, &schedule.domain) || Self::matches_pattern(base_domain, &schedule.domain) {
-                    return match schedule.action {
-                        ScheduleAction::Block => PolicyDecision::Blocked(BlockReason::ScheduledBlock),
-                        ScheduleAction::Allow => PolicyDecision::Allowed(format!("Schedule: {}", schedule.label)),
-                    };
-                }
-            }
-        }
+
 
         // 7. Typosquatting Defense
         if Self::is_typosquatting(domain) {
