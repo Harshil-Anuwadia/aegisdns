@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+.dns-backup
+target
+*.db
+*.db-*
+*.log
+REVIEW-*.md
+patch_live_tab.sh
+patch.rs
+wipe_all.sh
+scalpel-sop

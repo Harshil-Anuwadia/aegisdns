@@ -1,0 +1,1615 @@
+#!/bin/bash
+# ══════════════════════════════════════════════════════════════
+# AegisDNS CLI — Full control over your DNS fortress
+# ══════════════════════════════════════════════════════════════
+set -o pipefail
+
+VERSION="1.0.0"
+
+# ── Config ──────────────────────────────────────────────────
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE_PATH" ]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+    SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+    [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+AEGIS_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+BACKUP_DIR="$AEGIS_DIR/.dns-backup"
+BACKUP_RESOLV="$BACKUP_DIR/resolv.conf.bak"
+BACKUP_STUB="$BACKUP_DIR/stub-state.bak"
+BACKUP_SYMLINK="$BACKUP_DIR/resolv-symlink.bak"
+BACKUP_TAILSCALE="$BACKUP_DIR/tailscale-dns.bak"
+BACKUP_MARKER="$BACKUP_DIR/complete"
+CONTAINER_NAME="aegisdns"
+DASHBOARD_PORT="5380"
+API="http://localhost:$DASHBOARD_PORT/api"
+
+# ── Colors ──────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
+fail() { echo -e "  ${RED}✗${NC} $*"; }
+warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
+info() { echo -e "  ${CYAN}→${NC} $*"; }
+hdr()  { echo -e "\n${BOLD}$*${NC}\n"; }
+
+# ── Helpers ─────────────────────────────────────────────────
+DOCKER_CMD=()
+
+select_docker() {
+    [ ${#DOCKER_CMD[@]} -gt 0 ] && return 0
+    command -v docker &>/dev/null || return 1
+    if docker info &>/dev/null 2>&1; then
+        DOCKER_CMD=(docker)
+    elif command -v sudo &>/dev/null && sudo -n docker info &>/dev/null 2>&1; then
+        DOCKER_CMD=(sudo docker)
+    else
+        return 1
+    fi
+}
+
+docker_cmd() {
+    select_docker || return 1
+    "${DOCKER_CMD[@]}" "$@"
+}
+
+require_docker() {
+    if ! command -v docker &>/dev/null; then
+        fail "Docker is not installed"
+        echo -e "     Install: ${DIM}curl -fsSL https://get.docker.com | sh${NC}"
+        exit 1
+    fi
+    if ! select_docker; then
+        fail "Docker daemon is not running"
+        echo -e "     Start Docker, or open a new terminal if your user was just added to the docker group."
+        echo -e "     Linux service: ${DIM}sudo systemctl start docker${NC}"
+        exit 1
+    fi
+}
+
+is_running() {
+    docker_cmd inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -q "true"
+}
+
+container_exists() {
+    docker_cmd inspect "$CONTAINER_NAME" &>/dev/null
+}
+
+require_running() {
+    if ! is_running; then
+        fail "AegisDNS is not running"
+        echo -e "     Run: ${DIM}aegis start${NC}"
+        exit 1
+    fi
+}
+
+detect_ip() {
+    local ip=""
+    # Only use Tailscale IP — local IPs (10.x, 192.168.x) are useless for
+    # per-device tracking because DNS queries arrive via the Tailscale interface.
+    if command -v tailscale &>/dev/null; then
+        ip=$(tailscale ip -4 2>/dev/null || true)
+    fi
+    # Use a reachable LAN address when Tailscale is unavailable.
+    if [ -z "$ip" ]; then
+        if command -v ip &>/dev/null; then
+            ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
+        fi
+    fi
+    if [ -z "$ip" ] && command -v hostname &>/dev/null; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    if ! [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        ip="127.0.0.1"
+    else
+        local octet
+        local -a _octets
+        IFS=. read -r -a _octets <<< "$ip"
+        for octet in "${_octets[@]}"; do
+            if [ "$octet" -gt 255 ]; then ip="127.0.0.1"; break; fi
+        done
+    fi
+    echo "$ip"
+}
+
+get_admin_password() {
+    local password="${AEGIS_ADMIN_PASSWORD:-}"
+    if [ -z "$password" ] && [ -f "$AEGIS_DIR/.env" ]; then
+        password=$(sed -n 's/^AEGIS_ADMIN_PASSWORD=//p' "$AEGIS_DIR/.env" | tail -n 1)
+    fi
+    if [ -z "$password" ]; then
+        if [ -r "${AEGIS_DATA_DIR:-/var/lib/aegisdns}/admin-password" ]; then
+            password=$(cat "${AEGIS_DATA_DIR:-/var/lib/aegisdns}/admin-password")
+        else
+            password=$(docker_cmd exec -u 10001 "$CONTAINER_NAME" cat /var/lib/aegisdns/admin-password 2>/dev/null) || return 1
+        fi
+    fi
+    [ -n "$password" ] || return 1
+    printf '%s' "$password"
+}
+
+# API helper — silent on failure, returns empty string
+# Credentials are passed on curl's stdin, never in process arguments.
+auth_curl() {
+    local password
+    password=$(get_admin_password) || return 1
+    local credential
+    credential=$(printf 'admin:%s' "$password" | base64 | tr -d '\r\n')
+    printf 'header = "Authorization: Basic %s"\nheader = "X-Aegis-Request: 1"\n' "$credential" | \
+        curl --config - -sf --connect-timeout 3 --max-time 30 "$@"
+}
+api_get() {
+    auth_curl "$API/$1" || return 1
+}
+api_post() {
+    auth_curl -X POST "$API/$1" -H "Content-Type: application/json" --data-binary "$2" || return 1
+}
+api_delete() {
+    if [ -n "${2:-}" ]; then
+        auth_curl -X DELETE "$API/$1" -H "Content-Type: application/json" --data-binary "$2"
+    else
+        auth_curl -X DELETE "$API/$1"
+    fi
+}
+
+# Wait for the API to become healthy after start
+wait_for_api() {
+    local attempts=0
+    local max=15
+    while [ $attempts -lt $max ]; do
+        local code
+        code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 --max-time 2 "$API/stats" || echo "000")
+        if [ "$code" = "200" ] || [ "$code" = "401" ]; then
+            return 0
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
+# Pretty-print JSON value
+json_val() {
+    local json="$1" key="$2"
+    if command -v python3 &>/dev/null; then
+        JSON_INPUT="$json" JSON_KEY="$key" python3 -c 'import json,os; v=json.loads(os.environ["JSON_INPUT"]).get(os.environ["JSON_KEY"], ""); print(str(v).lower() if isinstance(v,bool) else v)' 2>/dev/null
+    else
+        local value
+        value=$(printf '%s\n' "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
+        if [ -n "$value" ]; then printf '%s\n' "$value"; else
+            printf '%s\n' "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" | head -n 1 | tr -d '[:space:]'
+        fi
+    fi
+}
+
+json_num() { json_val "$1" "$2"; }
+
+json_escape() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '%s' "$value"
+}
+
+url_encode() {
+    local value="$1"
+    if command -v python3 &>/dev/null; then
+        URL_VALUE="$value" python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["URL_VALUE"], safe=""))'
+    else
+        local out="" char hex i
+        for ((i=0; i<${#value}; i++)); do
+            char=${value:i:1}
+            case "$char" in
+                [a-zA-Z0-9.~_-]) out+="$char" ;;
+                *) printf -v hex '%%%02X' "'$char"; out+="$hex" ;;
+            esac
+        done
+        printf '%s\n' "$out"
+    fi
+}
+
+response_succeeded() { [ "$(json_val "$1" success)" = "true" ]; }
+response_message() { json_val "$1" message; }
+
+print_domain_counts() {
+    local json="$1" color="$2"
+    if command -v python3 &>/dev/null; then
+        JSON_INPUT="$json" python3 -c 'import json,os; data=json.loads(os.environ["JSON_INPUT"]); data=data.get("top_domains",[]) if isinstance(data,dict) else data; [print(f"{int(row.get(chr(99)+chr(111)+chr(117)+chr(110)+chr(116),0))}\t{row.get(chr(100)+chr(111)+chr(109)+chr(97)+chr(105)+chr(110),chr(63))}") for row in data[:5]]' 2>/dev/null |
+        while IFS=$'\t' read -r count domain; do printf "  %b%6s%b  %s\n" "$color" "$count" "$NC" "$domain"; done
+    else
+        printf '  %b%s%b\n' "$DIM" "$json" "$NC"
+    fi
+}
+
+print_policy_json() {
+    local json="$1"
+    if ! command -v python3 &>/dev/null; then
+        printf '  %b%s%b\n' "$DIM" "$json" "$NC"
+        return
+    fi
+    JSON_INPUT="$json" python3 -c '
+import json, os
+p=json.loads(os.environ["JSON_INPUT"])
+sections=[("Global Allowed",p.get("allowed",[]),"✓"),("Global Denied",p.get("denied",[]),"✗")]
+for ip,rules in sorted(p.get("device_allowed",{}).items()): sections.append((f"Allowed for {ip}",rules,"✓"))
+for ip,rules in sorted(p.get("device_denied",{}).items()): sections.append((f"Denied for {ip}",rules,"✗"))
+shown=False
+for title,rules,mark in sections:
+    if not rules: continue
+    shown=True; print(f"  {title}")
+    for domain in rules: print(f"    {mark} {domain}")
+    print()
+if not shown: print("  No custom rules configured")
+' 2>/dev/null || printf '  %b%s%b\n' "$DIM" "$json" "$NC"
+}
+
+upsert_env_value() {
+    local key="$1" value="$2" file="$AEGIS_DIR/.env" tmp
+    tmp=$(mktemp "$AEGIS_DIR/.env.XXXXXX") || return 1
+    if [ -f "$file" ]; then
+        awk -v k="$key" -v v="$value" 'BEGIN{done=0} index($0,k "=")==1 {if(!done){print k "=" v;done=1};next} {print} END{if(!done)print k "=" v}' "$file" > "$tmp"
+    else
+        printf '%s=%s\n' "$key" "$value" > "$tmp"
+    fi
+    chmod 600 "$tmp"
+    mv "$tmp" "$file"
+}
+
+# ── DNS Backup & Restore ───────────────────────────────────
+backup_dns() {
+    if [ -f "$BACKUP_MARKER" ]; then
+        info "Using the existing DNS backup"
+        return 0
+    fi
+    mkdir -p "$BACKUP_DIR"
+
+    # Back up the exact resolver file, including files generated by Tailscale.
+    if [ -f /etc/resolv.conf ]; then
+        if ! cat /etc/resolv.conf > "$BACKUP_RESOLV" 2>/dev/null; then
+            fail "Could not back up /etc/resolv.conf"
+            return 1
+        fi
+        # Save the symlink target without relying on GNU readlink -f.
+        if [ -L /etc/resolv.conf ]; then
+            local link_target
+            link_target=$(readlink /etc/resolv.conf) || return 1
+            if [[ "$link_target" = /* ]]; then
+                printf '%s\n' "$link_target" > "$BACKUP_SYMLINK"
+            else
+                printf '/etc/%s\n' "$link_target" > "$BACKUP_SYMLINK"
+            fi
+        else
+            rm -f "$BACKUP_SYMLINK" 2>/dev/null || true
+        fi
+    fi
+
+    # Save systemd-resolved stub listener state
+    if command -v systemctl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        if [ -f /etc/systemd/resolved.conf.d/aegisdns.conf ]; then
+            echo "stub_was_disabled" > "$BACKUP_STUB"
+        else
+            echo "stub_was_enabled" > "$BACKUP_STUB"
+        fi
+    fi
+    if command -v tailscale &>/dev/null; then
+        local prefs
+        prefs=$(tailscale debug prefs 2>/dev/null || sudo -n tailscale debug prefs 2>/dev/null || true)
+        if printf '%s\n' "$prefs" | grep -Eq '"CorpDNS"[[:space:]]*:[[:space:]]*true'; then
+            echo "true" > "$BACKUP_TAILSCALE"
+        elif printf '%s\n' "$prefs" | grep -Eq '"CorpDNS"[[:space:]]*:[[:space:]]*false'; then
+            echo "false" > "$BACKUP_TAILSCALE"
+        fi
+    fi
+    : > "$BACKUP_MARKER"
+    ok "Backed up current DNS configuration"
+}
+
+activate_dns() {
+    info "Configuring system DNS to use AegisDNS..."
+    echo -e "     ${DIM}(you may be prompted for your sudo password)${NC}"
+
+    # Handle systemd-resolved (free port 53)
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-active --quiet systemd-resolved 2>/dev/null || systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
+            sudo mkdir -p /etc/systemd/resolved.conf.d || return 1
+            printf '[Resolve]\nDNSStubListener=no\n' | sudo tee /etc/systemd/resolved.conf.d/aegisdns.conf >/dev/null || return 1
+
+            sudo systemctl unmask systemd-resolved.service 2>/dev/null || true
+            if ! sudo systemctl restart systemd-resolved 2>/dev/null; then
+                fail "Could not restart systemd-resolved"
+                return 1
+            fi
+            ok "Disabled systemd-resolved stub listener (port 53 freed)"
+        fi
+    fi
+
+    # Stop Tailscale from managing DNS — it overwrites /etc/resolv.conf otherwise,
+    # redirecting all queries to 100.100.100.100 and bypassing AegisDNS entirely.
+    if command -v tailscale &>/dev/null && sudo tailscale status &>/dev/null 2>&1; then
+        if sudo tailscale set --accept-dns=false 2>/dev/null; then
+            ok "Stopped Tailscale DNS management (AegisDNS takes over)"
+        else
+            warn "Could not disable Tailscale DNS management"
+        fi
+    fi
+
+    # Write resolv.conf AFTER disabling Tailscale DNS so it doesn't clobber us
+    sudo rm -f /etc/resolv.conf 2>/dev/null || return 1
+    sudo bash -c 'printf "nameserver 127.0.0.1\n" > /etc/resolv.conf' || return 1
+    ok "System DNS pointed to AegisDNS (127.0.0.1)"
+}
+
+restore_dns() {
+    info "Restoring original DNS configuration..."
+    echo -e "     ${DIM}(you may be prompted for your sudo password)${NC}"
+
+    local failed=false restored_resolv=false
+
+    # Restore the user's prior Tailscale DNS preference when it was detectable.
+    if command -v tailscale &>/dev/null && [ -f "$BACKUP_TAILSCALE" ]; then
+        local accept_dns
+        accept_dns=$(cat "$BACKUP_TAILSCALE")
+        if sudo tailscale set --accept-dns="$accept_dns" 2>/dev/null; then
+            ok "Restored the previous Tailscale DNS preference"
+        else
+            warn "Could not restore the previous Tailscale DNS preference"
+            failed=true
+        fi
+    fi
+
+    # Restore systemd-resolved stub listener
+    if [ -f "$BACKUP_STUB" ]; then
+        local state
+        state=$(cat "$BACKUP_STUB")
+        if [ "$state" = "stub_was_enabled" ]; then
+            if sudo rm -f /etc/systemd/resolved.conf.d/aegisdns.conf 2>/dev/null && sudo systemctl restart systemd-resolved 2>/dev/null; then
+                ok "Re-enabled systemd-resolved stub listener"
+            else
+                warn "Could not re-enable the system DNS stub listener"
+                failed=true
+            fi
+        fi
+    elif [ -f /etc/systemd/resolved.conf.d/aegisdns.conf ]; then
+        # No backup but our config exists — clean it up
+        if sudo rm -f /etc/systemd/resolved.conf.d/aegisdns.conf 2>/dev/null && sudo systemctl restart systemd-resolved 2>/dev/null; then
+            ok "Removed AegisDNS stub override"
+        else
+            warn "Could not remove the AegisDNS stub override"
+            failed=true
+        fi
+    fi
+
+    # Restore resolv.conf
+    if [ -f "$BACKUP_SYMLINK" ]; then
+        local target
+        target=$(cat "$BACKUP_SYMLINK")
+        if [ -f "$target" ]; then
+            if sudo ln -sf "$target" /etc/resolv.conf 2>/dev/null; then
+                ok "Restored resolv.conf → $target"
+                restored_resolv=true
+            else failed=true; fi
+        elif [ -f "$BACKUP_RESOLV" ]; then
+            if sudo cp "$BACKUP_RESOLV" /etc/resolv.conf 2>/dev/null; then
+                ok "Restored resolv.conf from backup"
+                restored_resolv=true
+            else failed=true; fi
+        fi
+    elif [ -f "$BACKUP_RESOLV" ]; then
+        if sudo cp "$BACKUP_RESOLV" /etc/resolv.conf 2>/dev/null; then
+            ok "Restored resolv.conf from backup"
+            restored_resolv=true
+        else failed=true; fi
+    else
+        # With no saved file, reconnect to the system resolver when possible.
+        if command -v systemctl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+            if [ -f /run/systemd/resolve/stub-resolv.conf ]; then
+                sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null && restored_resolv=true || failed=true
+            fi
+        fi
+        if ! $restored_resolv; then
+            warn "No original resolv.conf backup is available; leaving the current resolver file in place"
+        fi
+    fi
+
+    if $failed; then
+        fail "DNS restoration was incomplete; backup retained at $BACKUP_DIR"
+        return 1
+    fi
+    ok "System DNS restored"
+    rm -rf "$BACKUP_DIR"
+}
+
+update_config() {
+    local ip="$1"
+
+    # Keep user-supplied secrets and options while refreshing the detected address.
+    upsert_env_value "AEGIS_HOST_IP" "$ip" || {
+        fail "Could not update $AEGIS_DIR/.env"
+        return 1
+    }
+
+    # Create or update config.json
+    if [ ! -f "$AEGIS_DIR/config.json" ]; then
+        if [ "$ip" = "127.0.0.1" ]; then
+            cat > "$AEGIS_DIR/config.json" <<EOF
+{
+  "host_ips": ["127.0.0.1"]
+}
+EOF
+        else
+            cat > "$AEGIS_DIR/config.json" <<EOF
+{
+  "host_ips": [
+    "127.0.0.1",
+    "$ip"
+  ]
+}
+EOF
+        fi
+        ok "Created config.json with IP $ip"
+    else
+        if command -v python3 &>/dev/null; then
+            if ! AEGIS_CONFIG_FILE="$AEGIS_DIR/config.json" python3 -c 'import json,os; c=json.load(open(os.environ["AEGIS_CONFIG_FILE"],encoding="utf-8")); assert isinstance(c,dict); assert isinstance(c.get("host_ips",[]),list)' 2>/dev/null; then
+                fail "config.json is invalid; fix it or run: aegis config reset"
+                return 1
+            fi
+        fi
+        if ! grep -Fq "\"$ip\"" "$AEGIS_DIR/config.json" 2>/dev/null; then
+            if command -v python3 &>/dev/null; then
+                AEGIS_CONFIG_FILE="$AEGIS_DIR/config.json" AEGIS_NEW_IP="$ip" python3 -c '
+import json, os
+path, ip = os.environ["AEGIS_CONFIG_FILE"], os.environ["AEGIS_NEW_IP"]
+with open(path, encoding="utf-8") as f: config = json.load(f)
+ips = config.get("host_ips", ["127.0.0.1"])
+if not isinstance(ips, list): raise ValueError("host_ips must be an array")
+if ip not in ips: ips.append(ip)
+config["host_ips"] = ips
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f: json.dump(config, f, indent=2); f.write("\n")
+os.replace(tmp, path)
+' 2>/dev/null && ok "Added $ip to config.json" || warn "Could not update config.json automatically — add \"$ip\" to host_ips manually"
+            else
+                fail "Python 3 is needed to safely add $ip to config.json"
+                return 1
+            fi
+        else
+            ok "config.json already contains $ip"
+        fi
+    fi
+}
+
+check_port53() {
+    if command -v ss &>/dev/null; then
+        if ss -tulpn 2>/dev/null | grep -Eq ':[5]3([^0-9]|$)'; then
+            local owner
+            owner=$(ss -tulpn 2>/dev/null | grep -E ':[5]3([^0-9]|$)' | head -1 | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')
+            [ -n "$owner" ] || owner="unknown"
+            warn "Port 53 is in use by: $owner"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# ── Commands ────────────────────────────────────────────────
+
+cmd_start() {
+    hdr "Starting AegisDNS"
+    require_docker
+
+    if is_running; then
+        ok "AegisDNS is already running"
+        echo -e "     Use ${CYAN}aegis restart${NC} to restart\n"
+        return 0
+    fi
+
+    # Report Tailscale state without taking ownership of the user's VPN service.
+    if command -v tailscale &>/dev/null; then
+        local ts_status
+        ts_status=$(tailscale status 2>&1 || true)
+        if echo "$ts_status" | grep -qi "stopped\|logged out\|NeedsLogin"; then
+            warn "Tailscale is not logged in"
+            echo -e "     Run: ${DIM}sudo tailscale up${NC} to log in"
+            echo ""
+        else
+            ok "Tailscale is running"
+        fi
+    fi
+
+    # Detect IP
+    local ip
+    ip=$(detect_ip)
+    ok "Detected IP: $ip"
+
+    # Update config files
+    update_config "$ip" || return 1
+
+    # Backup current DNS before we touch anything
+    backup_dns || return 1
+
+    # Free port 53 and activate DNS
+    if ! activate_dns; then
+        fail "Could not configure the host resolver"
+        restore_dns || true
+        return 1
+    fi
+
+    # Verify port 53 is free
+    if ! check_port53; then
+        warn "Attempting to continue anyway..."
+    fi
+
+    # Start container
+    info "Starting container..."
+    cd "$AEGIS_DIR"
+    local compose_output
+    if compose_output=$(docker_cmd compose up -d 2>&1); then
+        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 || true
+        # Health check
+        info "Waiting for AegisDNS to be ready..."
+        if wait_for_api; then
+            # Auto-register the host device so it appears on the dashboard immediately
+            local hname
+            hname=$(hostname)
+            api_post "devices" "{\"ip\":\"$(json_escape "$ip")\",\"name\":\"$(json_escape "$hname (Host)")\"}" >/dev/null 2>&1 || true
+
+            echo ""
+            ok "${GREEN}${BOLD}AegisDNS is running!${NC}"
+            echo -e "     Dashboard: ${CYAN}http://localhost:$DASHBOARD_PORT${NC}"
+            echo ""
+        else
+            echo ""
+            fail "Container started but its API did not become ready"
+            docker_cmd compose down >/dev/null 2>&1 || true
+            restore_dns || true
+            echo -e "     Check: ${DIM}aegis logs${NC}"
+            echo ""
+            return 1
+        fi
+    else
+        echo ""
+        fail "Failed to start container"
+        warn "Restoring your DNS to previous state..."
+        restore_dns
+        echo -e "\n     Check: ${DIM}aegis logs${NC} or ${DIM}docker compose logs${NC}\n"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    hdr "Stopping AegisDNS"
+
+    if is_running; then
+        cd "$AEGIS_DIR"
+        local compose_output
+        if ! compose_output=$(docker_cmd compose down 2>&1); then
+            printf '%s\n' "$compose_output" | tail -5
+            fail "Could not stop the container"
+            return 1
+        fi
+        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 || true
+        ok "Container stopped"
+    elif container_exists; then
+        cd "$AEGIS_DIR"
+        docker_cmd compose down 2>/dev/null || true
+        ok "Cleaned up stopped container"
+    else
+        if select_docker; then
+            info "AegisDNS was not running"
+        else
+            warn "Docker is unavailable; restoring host DNS without container cleanup"
+        fi
+    fi
+
+    # Restore DNS to system default
+    restore_dns || return 1
+
+    echo -e "\n  ${GREEN}Everything stopped. System DNS restored to defaults.${NC}\n"
+}
+
+cmd_restart() {
+    hdr "Restarting AegisDNS"
+    require_docker
+
+    if is_running; then
+        cd "$AEGIS_DIR"
+
+        # Refresh IP and config before restart
+        local ip
+        ip=$(detect_ip)
+        update_config "$ip" || return 1
+
+        # Re-assert DNS ownership — Tailscale may have re-grabbed resolv.conf
+        backup_dns || return 1
+        activate_dns || return 1
+
+        # Recreate container in case image was updated
+        local compose_output
+        if ! compose_output=$(docker_cmd compose up -d 2>&1); then
+            printf '%s\n' "$compose_output" | tail -5
+            fail "Container restart failed"
+            return 1
+        fi
+        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 || true
+
+        info "Waiting for API..."
+        if wait_for_api; then
+            # Auto-register the host device so it appears on the dashboard immediately
+            local hname
+            hname=$(hostname)
+            api_post "devices" "{\"ip\":\"$(json_escape "$ip")\",\"name\":\"$(json_escape "$hname (Host)")\"}" >/dev/null 2>&1 || true
+
+            ok "AegisDNS restarted"
+            echo -e "     Dashboard: ${CYAN}http://localhost:$DASHBOARD_PORT${NC}\n"
+        else
+            fail "Restarted but API is not responding — check logs"
+            echo ""
+            return 1
+        fi
+    else
+        info "Not running — doing a full start instead"
+        cmd_start
+    fi
+}
+
+cmd_status() {
+    hdr "AegisDNS Status"
+
+    # ── Container ──
+    if is_running; then
+        local started
+        started=$(docker_cmd inspect -f '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null | cut -d'.' -f1 | sed 's/T/ /' || echo "?")
+        local mem
+        mem=$(docker_cmd stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")
+        ok "Container: ${GREEN}running${NC}  ${DIM}(since $started | mem: $mem)${NC}"
+    else
+        fail "Container: ${RED}stopped${NC}"
+    fi
+
+    # ── Network ──
+    local ip
+    ip=$(detect_ip)
+    info "Host IP: $ip"
+
+    if command -v tailscale &>/dev/null; then
+        local ts_ip
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+        if [ -n "$ts_ip" ]; then
+            info "Tailscale IP: $ts_ip"
+        else
+            info "Tailscale: installed but not connected"
+        fi
+    fi
+
+    # ── DNS ──
+    if [ -f /etc/resolv.conf ]; then
+        local dns
+        dns=$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ', ' | sed 's/,$//')
+        info "System DNS: $dns"
+    fi
+
+    if [ -f /etc/systemd/resolved.conf.d/aegisdns.conf ]; then
+        info "Stub listener: ${YELLOW}disabled by AegisDNS${NC}"
+    elif command -v systemctl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        info "Stub listener: active (default)"
+    fi
+
+    # ── Config ──
+    if [ -f "$AEGIS_DIR/config.json" ]; then
+        if grep -q "\"$ip\"" "$AEGIS_DIR/config.json" 2>/dev/null; then
+            ok "config.json: contains your IP"
+        else
+            warn "config.json: ${YELLOW}missing your IP ($ip)${NC} — run ${DIM}aegis restart${NC} to fix"
+        fi
+    else
+        warn "config.json: not found — run ${DIM}aegis start${NC} to create"
+    fi
+
+    if [ -f "$BACKUP_RESOLV" ]; then
+        ok "DNS backup: saved (will restore on ${DIM}aegis stop${NC})"
+    else
+        info "DNS backup: none"
+    fi
+
+    # ── Live Stats ──
+    if is_running; then
+        local stats
+        stats=$(api_get "stats")
+        if [ -n "$stats" ]; then
+            local queries blocked allowed cache_hits latency
+            queries=$(json_num "$stats" "queries_today")
+            blocked=$(json_num "$stats" "blocked_today")
+            allowed=$(json_num "$stats" "allowed_today")
+            cache_hits=$(json_num "$stats" "cache_hits")
+            latency=$(json_num "$stats" "avg_latency_ms")
+
+            local pct="0"
+            if [ "${queries:-0}" -gt 0 ] 2>/dev/null; then
+                pct=$(awk "BEGIN{printf \"%.1f\", ${blocked:-0}/${queries}*100}")
+            fi
+
+            echo ""
+            echo -e "  ${BOLD}Today${NC}  ${queries:-0} queries | ${RED}${blocked:-0} blocked${NC} ($pct%) | ${GREEN}${allowed:-0} allowed${NC} | ${CYAN}${cache_hits:-0} cached${NC} | ${latency:-0}ms avg"
+        fi
+
+        # Quarantine
+        local quarantine
+        quarantine=$(api_get "quarantine")
+        if [ -n "$quarantine" ] && [ "$quarantine" != "[]" ]; then
+            local q_count
+            q_count=$(echo "$quarantine" | tr -cd ',' | wc -c)
+            q_count=$((q_count + 1))
+            echo -e "  ${BOLD}Quarantine${NC}  ${YELLOW}${q_count} device(s) quarantined${NC} — run ${DIM}aegis quarantine${NC} to see"
+        fi
+    fi
+
+    echo ""
+}
+
+cmd_logs() {
+    require_docker
+    local lines="${1:-50}"
+    hdr "AegisDNS Logs  ${DIM}(last $lines lines)${NC}"
+    cd "$AEGIS_DIR"
+    docker_cmd compose logs --tail="$lines" --no-log-prefix 2>/dev/null || fail "Could not fetch logs"
+    echo ""
+}
+
+cmd_logs_follow() {
+    require_docker
+    hdr "AegisDNS Logs  ${DIM}(live — Ctrl+C to exit)${NC}"
+    cd "$AEGIS_DIR"
+    docker_cmd compose logs -f --tail=30 --no-log-prefix 2>/dev/null || fail "Could not fetch logs"
+}
+
+cmd_build() {
+    hdr "Building AegisDNS"
+    require_docker
+    cd "$AEGIS_DIR"
+    docker_cmd compose build
+    echo ""
+    ok "Build complete"
+    echo ""
+}
+
+cmd_rebuild() {
+    hdr "Rebuilding AegisDNS  ${DIM}(no cache)${NC}"
+    require_docker
+    cd "$AEGIS_DIR"
+    docker_cmd compose build --no-cache
+    echo ""
+    ok "Rebuild complete"
+    echo ""
+}
+
+# ── Blocking Commands ───────────────────────────────────────
+
+cmd_allow() {
+    local domain="${1:-}"
+    local device="${2:-}"
+    if [ -z "$domain" ]; then
+        fail "Usage: aegis allow <domain> [device-ip]"
+        exit 1
+    fi
+    require_running
+
+    local payload="{\"domain\":\"$(json_escape "$domain")\""
+    [ -n "$device" ] && payload="$payload,\"device_id\":\"$(json_escape "$device")\""
+    payload="$payload}"
+
+    local resp
+    resp=$(api_post "allow" "$payload")
+    if [ -n "$resp" ] && response_succeeded "$resp"; then
+        ok "Allowed: ${GREEN}$domain${NC}${device:+ for device $device}"
+    else
+        local msg
+        msg=$(response_message "$resp" 2>/dev/null || true)
+        fail "${msg:-Failed to allow $domain — check the API}"
+        return 1
+    fi
+}
+
+cmd_deny() {
+    local domain="${1:-}"
+    local device="${2:-}"
+    if [ -z "$domain" ]; then
+        fail "Usage: aegis deny <domain> [device-ip]"
+        exit 1
+    fi
+    require_running
+
+    local payload="{\"domain\":\"$(json_escape "$domain")\""
+    [ -n "$device" ] && payload="$payload,\"device_id\":\"$(json_escape "$device")\""
+    payload="$payload}"
+
+    local resp
+    resp=$(api_post "deny" "$payload")
+    if [ -n "$resp" ] && response_succeeded "$resp"; then
+        ok "Blocked: ${RED}$domain${NC}${device:+ for device $device}"
+    else
+        local msg
+        msg=$(response_message "$resp" 2>/dev/null || true)
+        fail "${msg:-Failed to block $domain — check the API}"
+        return 1
+    fi
+}
+
+cmd_remove() {
+    local domain="${1:-}"
+    local device="${2:-}"
+    if [ -z "$domain" ]; then
+        fail "Usage: aegis remove <domain> [device-ip]"
+        exit 1
+    fi
+    require_running
+
+    local payload="{\"domain\":\"$(json_escape "$domain")\""
+    [ -n "$device" ] && payload="$payload,\"device_id\":\"$(json_escape "$device")\""
+    payload="$payload}"
+
+    local resp
+    resp=$(api_post "policy/remove" "$payload")
+    if [ -n "$resp" ] && response_succeeded "$resp"; then
+        ok "Removed rule for: $domain${device:+ (device $device)}"
+    else
+        local msg
+        msg=$(response_message "$resp" 2>/dev/null || true)
+        fail "${msg:-Failed to remove rule for $domain}"
+        return 1
+    fi
+}
+
+# ── Monitoring Commands ─────────────────────────────────────
+
+cmd_stats() {
+    require_running
+    local device_qs=""
+    hdr "AegisDNS Stats"
+    if [ -n "${1:-}" ]; then
+        device_qs="?device_id=$(url_encode "$1")"
+        info "Filtering: device $1"
+        echo ""
+    fi
+
+    local stats
+    stats=$(api_get "stats$device_qs")
+    if [ -z "$stats" ]; then
+        fail "Could not reach API"
+        return 1
+    fi
+
+    local queries blocked allowed cache_hits latency
+    queries=$(json_num "$stats" "queries_today")
+    blocked=$(json_num "$stats" "blocked_today")
+    allowed=$(json_num "$stats" "allowed_today")
+    cache_hits=$(json_num "$stats" "cache_hits")
+    latency=$(json_num "$stats" "avg_latency_ms")
+
+    local pct="0"
+    if [ "${queries:-0}" -gt 0 ] 2>/dev/null; then
+        pct=$(awk "BEGIN{printf \"%.1f\", ${blocked:-0}/${queries}*100}")
+    fi
+
+    echo -e "  Queries Today   ${BOLD}${queries:-0}${NC}"
+    echo -e "  Blocked         ${RED}${blocked:-0}${NC}  ($pct%)"
+    echo -e "  Allowed         ${GREEN}${allowed:-0}${NC}"
+    echo -e "  Cache Hits      ${CYAN}${cache_hits:-0}${NC}"
+    echo -e "  Avg Latency     ${latency:-0}ms"
+
+    # Top domains
+    echo ""
+    local top
+    top=$(api_get "top-domains$device_qs")
+    if [ -n "$top" ] && [ "$top" != "[]" ]; then
+        echo -e "  ${BOLD}Top Queried${NC}"
+        print_domain_counts "$top" "$DIM"
+    fi
+
+    local top_blocked
+    top_blocked=$(api_get "top-blocked$device_qs")
+    if [ -n "$top_blocked" ] && [ "$top_blocked" != "[]" ]; then
+        echo ""
+        echo -e "  ${BOLD}Top Blocked${NC}"
+        print_domain_counts "$top_blocked" "$RED"
+    fi
+
+    echo ""
+}
+
+cmd_device() {
+    local subcmd="${1:-list}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        add)
+            local ip="${1:-}"
+            local name="${2:-}"
+            if [ -z "$ip" ] || [ -z "$name" ]; then
+                fail "Usage: aegis device add <ip> <name>"
+                echo -e "     Example: ${DIM}aegis device add 100.64.0.1 \"My Phone\"${NC}"
+                exit 1
+            fi
+            require_running
+
+            local resp
+            resp=$(api_post "devices" "{\"ip\":\"$(json_escape "$ip")\",\"name\":\"$(json_escape "$name")\"}")
+            if [ -z "$resp" ]; then
+                fail "Could not reach API"
+                return 1
+            fi
+            local success
+            success=$(json_val "$resp" "success")
+            if [ "$success" = "true" ]; then
+                ok "Added device: ${BOLD}$name${NC} ($ip)"
+            else
+                local msg
+                msg=$(json_val "$resp" "message")
+                fail "$msg"
+            fi
+            echo ""
+            ;;
+        remove|rm|del|delete)
+            local ip="${1:-}"
+            if [ -z "$ip" ]; then
+                fail "Usage: aegis device remove <ip>"
+                exit 1
+            fi
+            require_running
+
+            local resp
+            resp=$(api_delete "devices/$(url_encode "$ip")")
+            if [ -z "$resp" ]; then
+                fail "Could not reach API"
+                return 1
+            fi
+            local success
+            success=$(json_val "$resp" "success")
+            if [ "$success" = "true" ]; then
+                ok "Removed device: $ip"
+            else
+                local msg
+                msg=$(json_val "$resp" "message")
+                fail "$msg"
+            fi
+            echo ""
+            ;;
+        list|ls|"")
+            require_running
+            hdr "Registered Devices"
+            local devices
+            devices=$(api_get "devices")
+            if [ -z "$devices" ] || [ "$devices" = "[]" ]; then
+                warn "No devices registered"
+                echo -e "     Add one: ${DIM}aegis device add <ip> <name>${NC}"
+                echo ""
+                return
+            fi
+
+            # Parse JSON array of {ip, name} objects
+            echo "$devices" | python3 -c "
+import json, sys
+devs = json.load(sys.stdin)
+for d in devs:
+    print(f\"  \033[0;36m●\033[0m {d['name']:20s}  \033[2m{d['ip']}\033[0m\")
+" 2>/dev/null || echo -e "  ${DIM}$devices${NC}"
+            echo ""
+            ;;
+        *)
+            fail "Unknown device subcommand: $subcmd"
+            echo -e "     Usage: ${DIM}aegis device [add|remove|list]${NC}\n"
+            ;;
+    esac
+}
+
+# Keep backward compat for "aegis devices"
+cmd_devices() {
+    cmd_device list
+}
+
+cmd_policy() {
+    require_running
+    hdr "Current Policy Rules"
+
+    local policy
+    policy=$(api_get "policy")
+    if [ -z "$policy" ]; then
+        fail "Could not fetch policy"
+        return 1
+    fi
+
+    print_policy_json "$policy"
+}
+
+cmd_test() {
+    hdr "DNS Test"
+
+    local domain="${1:-google.com}"
+
+    # Test if DNS resolution works
+    info "Testing DNS resolution for $domain..."
+    if command -v dig &>/dev/null; then
+        local result status
+        result=$(dig +time=2 +tries=1 "$domain" @127.0.0.1 2>/dev/null || true)
+        status=$(printf '%s\n' "$result" | sed -n 's/.*status: \([A-Z]*\),.*/\1/p' | head -n 1)
+        if [ "$status" = "NOERROR" ]; then
+            local answer
+            answer=$(printf '%s\n' "$result" | awk '$4=="A" || $4=="AAAA" {print $5; exit}')
+            [ -n "$answer" ] || answer="NOERROR (no address record)"
+            ok "Resolved $domain → $answer"
+        elif [ "$status" = "NXDOMAIN" ]; then
+            warn "$domain is blocked or does not exist (NXDOMAIN)"
+        else
+            fail "Could not resolve $domain via AegisDNS (${status:-no response})"
+        fi
+    elif command -v nslookup &>/dev/null; then
+        if nslookup "$domain" 127.0.0.1 &>/dev/null; then
+            ok "Resolved $domain via AegisDNS"
+        else
+            fail "Could not resolve $domain via AegisDNS"
+        fi
+    else
+        warn "Neither 'dig' nor 'nslookup' found — install dnsutils"
+    fi
+
+    # Test if a known tracker is blocked
+    info "Testing if tracker blocking works..."
+    if command -v dig &>/dev/null; then
+        local blocked_result blocked_status
+        blocked_result=$(dig +time=2 +tries=1 "graph.facebook.com" @127.0.0.1 2>/dev/null || true)
+        blocked_status=$(printf '%s\n' "$blocked_result" | sed -n 's/.*status: \([A-Z]*\),.*/\1/p' | head -n 1)
+        if [ "$blocked_status" = "NXDOMAIN" ] || printf '%s\n' "$blocked_result" | grep -Eq '[[:space:]](127\.0\.0\.[0-9]+|0\.0\.0\.0)[[:space:]]*$'; then
+            ok "Tracker blocking is working (graph.facebook.com blocked)"
+        elif [ -z "$blocked_status" ] || [ "$blocked_status" = "SERVFAIL" ]; then
+            fail "Blocking test got ${blocked_status:-no response}; DNS is not healthy"
+        else
+            warn "graph.facebook.com is not blocked by the active lists"
+        fi
+    fi
+
+    # Diagnose a domain via API
+    if is_running && [ -n "${1:-}" ]; then
+        echo ""
+        info "API diagnosis for $domain..."
+        local diag
+        diag=$(api_post "diagnose" "{\"domain\":\"$(json_escape "$domain")\"}")
+        if [ -n "$diag" ]; then
+            echo -e "  ${DIM}$diag${NC}"
+        fi
+    fi
+    echo ""
+}
+
+cmd_risk() {
+    local domain="${1:-}"
+    if [ -z "$domain" ]; then
+        fail "Usage: aegis risk <domain>"
+        exit 1
+    fi
+    require_running
+    hdr "Risk Analysis: $domain"
+
+    local result
+    result=$(api_post "risk" "{\"domain\":\"$(json_escape "$domain")\"}")
+    if [ -z "$result" ]; then
+        fail "Could not analyze $domain"
+        return 1
+    fi
+
+    local score
+    score=$(json_num "$result" "score")
+    local verdict
+    verdict=$(json_val "$result" "verdict")
+
+    local color="$GREEN"
+    if [ "${score:-0}" -ge 70 ] 2>/dev/null; then
+        color="$RED"
+    elif [ "${score:-0}" -ge 40 ] 2>/dev/null; then
+        color="$YELLOW"
+    fi
+
+    echo -e "  Risk Score: ${color}${BOLD}${score:-?}/100${NC}"
+    echo -e "  Verdict:    ${verdict:-unknown}"
+    echo -e "\n  ${DIM}$result${NC}"
+    echo ""
+}
+
+cmd_quarantine() {
+    require_running
+    hdr "Quarantined Devices"
+
+    local quarantine
+    quarantine=$(api_get "quarantine")
+    if [ -z "$quarantine" ] || [ "$quarantine" = "[]" ]; then
+        ok "No devices are quarantined"
+        echo ""
+        return
+    fi
+
+    echo "$quarantine" | tr -d '[]"' | tr ',' '\n' | while read -r ip; do
+        [ -z "$ip" ] && continue
+        echo -e "  ${RED}⊘${NC} $ip"
+    done
+
+    echo -e "\n  ${DIM}To release a device: aegis unquarantine <ip>${NC}\n"
+}
+
+cmd_unquarantine() {
+    local ip="${1:-}"
+    if [ -z "$ip" ]; then
+        fail "Usage: aegis unquarantine <ip>"
+        exit 1
+    fi
+    require_running
+
+    if api_delete "quarantine/$(url_encode "$ip")" >/dev/null; then
+        ok "Released $ip from quarantine"
+    else
+        fail "Could not release $ip from quarantine"
+        return 1
+    fi
+}
+
+cmd_safesearch() {
+    require_running
+
+    if [ -z "${1:-}" ]; then
+        # Show current state
+        local state
+        state=$(api_get "safesearch")
+        local enabled
+        enabled=$(json_val "$state" "enabled")
+        if [ "$enabled" = "true" ]; then
+            ok "SafeSearch: ${GREEN}enabled${NC}"
+        else
+            info "SafeSearch: ${DIM}disabled${NC}"
+        fi
+        echo -e "     Toggle: ${DIM}aegis safesearch on${NC} / ${DIM}aegis safesearch off${NC}\n"
+        return
+    fi
+
+    case "$1" in
+        on|enable|true)
+            local resp
+            resp=$(api_post "safesearch" '{"enabled":true}')
+            if response_succeeded "$resp"; then
+                ok "SafeSearch ${GREEN}enabled${NC}"
+            else
+                local msg
+                msg=$(response_message "$resp" 2>/dev/null || true)
+                fail "${msg:-Could not update SafeSearch}"
+                return 1
+            fi
+            ;;
+        off|disable|false)
+            local resp
+            resp=$(api_post "safesearch" '{"enabled":false}')
+            if response_succeeded "$resp"; then ok "SafeSearch ${YELLOW}disabled${NC}"; else local msg; msg=$(response_message "$resp" 2>/dev/null || true); fail "${msg:-Could not update SafeSearch}"; return 1; fi
+            ;;
+        *)
+            fail "Usage: aegis safesearch [on|off]"
+            ;;
+    esac
+}
+
+cmd_flush() {
+    require_running
+    hdr "Flushing Logs"
+
+    local timeframe="${1:-all}"
+    case "$timeframe" in 1h|24h|7d|all) ;; *) fail "Timeframe must be 1h, 24h, 7d, or all"; return 1;; esac
+    local resp
+    resp=$(api_delete "logs" "{\"timeframe\":\"$timeframe\"}")
+    if [ -n "$resp" ] && response_succeeded "$resp"; then
+        ok "Flushed logs ($timeframe)"
+    else
+        local msg
+        msg=$(response_message "$resp" 2>/dev/null || true)
+        fail "${msg:-Could not flush logs}"
+        return 1
+    fi
+    echo ""
+}
+
+cmd_ip() {
+    hdr "Network Info"
+    local ip
+    ip=$(detect_ip)
+    info "Detected IP: $ip"
+
+    if command -v tailscale &>/dev/null; then
+        local ts_ip
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+        if [ -n "$ts_ip" ]; then
+            info "Tailscale IP: $ts_ip"
+        else
+            info "Tailscale: installed but not connected"
+        fi
+    fi
+
+    if [ -f /etc/resolv.conf ]; then
+        info "System DNS: $(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"
+    fi
+
+    if [ -f "$AEGIS_DIR/config.json" ]; then
+        if command -v python3 &>/dev/null; then
+            local host_ips
+            host_ips=$(AEGIS_CONFIG_FILE="$AEGIS_DIR/config.json" python3 -c 'import json,os; print(" ".join(json.load(open(os.environ["AEGIS_CONFIG_FILE"])).get("host_ips",[])))' 2>/dev/null || true)
+            info "config.json host_ips: ${host_ips:-invalid configuration}"
+        else
+            info "config.json: $AEGIS_DIR/config.json"
+        fi
+    fi
+    echo ""
+}
+
+cmd_config() {
+    local subcmd="${1:-show}"
+
+    case "$subcmd" in
+        show)
+            hdr "AegisDNS Configuration"
+            if [ -f "$AEGIS_DIR/config.json" ]; then
+                echo -e "  ${BOLD}config.json${NC}"
+                sed 's/^/     /' "$AEGIS_DIR/config.json"
+            else
+                warn "config.json not found"
+            fi
+            echo ""
+            if [ -f "$AEGIS_DIR/.env" ]; then
+                echo -e "  ${BOLD}.env${NC}"
+                sed -E 's/^(AEGIS_ADMIN_PASSWORD)=.*/\1=<redacted>/' "$AEGIS_DIR/.env" | sed 's/^/     /'
+            fi
+            echo ""
+            ;;
+        reset)
+            hdr "Resetting Configuration"
+            local ip
+            ip=$(detect_ip)
+            cat > "$AEGIS_DIR/config.json" <<EOF
+{
+  "host_ips": ["127.0.0.1"]
+}
+EOF
+            if [ "$ip" != "127.0.0.1" ]; then
+                update_config "$ip" || return 1
+            else
+                upsert_env_value "AEGIS_HOST_IP" "$ip" || return 1
+            fi
+            ok "Reset config.json and refreshed the host IP in .env"
+            echo ""
+            ;;
+        *)
+            fail "Usage: aegis config [show|reset]"
+            ;;
+    esac
+}
+
+cmd_dashboard() {
+    if ! is_running; then
+        fail "AegisDNS is not running"
+        echo -e "     Run: ${DIM}aegis start${NC}\n"
+        exit 1
+    fi
+
+    local url="http://localhost:$DASHBOARD_PORT"
+    echo -e "\n  Dashboard: ${CYAN}${BOLD}$url${NC}\n"
+    echo -e "  Username:  ${BOLD}admin${NC}"
+    echo -e "  Password:  run ${CYAN}aegis credentials${NC}\n"
+
+    # Try to open in browser
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$url" 2>/dev/null &
+        ok "Opened in browser"
+    elif command -v open &>/dev/null; then
+        open "$url" 2>/dev/null &
+        ok "Opened in browser"
+    else
+        info "Open the URL above in your browser"
+    fi
+    echo ""
+}
+
+cmd_credentials() {
+    require_running
+    local password
+    password=$(get_admin_password) || {
+        fail "Could not read the dashboard credential"
+        return 1
+    }
+    if [ -z "$password" ]; then
+        fail "The dashboard credential is empty"
+        return 1
+    fi
+    hdr "Dashboard Credentials"
+    echo -e "  Username: ${BOLD}admin${NC}"
+    echo -e "  Password: ${BOLD}$password${NC}"
+    echo -e "  URL:      ${CYAN}http://localhost:$DASHBOARD_PORT${NC}\n"
+}
+
+cmd_update() {
+    hdr "Updating AegisDNS"
+
+    cd "$AEGIS_DIR"
+
+    # Git pull
+    if [ -d .git ]; then
+        if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+            fail "The repository has uncommitted changes; commit or stash them before updating"
+            return 1
+        fi
+        info "Pulling latest code..."
+        if ! git pull --ff-only 2>&1 | sed 's/^/     /'; then
+            fail "Could not update the repository"
+            return 1
+        fi
+        echo ""
+    else
+        warn "Not a git repo — skipping code update"
+    fi
+
+    # Rebuild
+    require_docker
+    info "Rebuilding container..."
+    if ! docker_cmd compose build 2>&1 | tail -5; then
+        fail "Container build failed"
+        return 1
+    fi
+    ok "Build complete"
+
+    # Restart if running
+    if is_running; then
+        info "Restarting..."
+        if ! docker_cmd compose restart 2>&1 | tail -3; then
+            fail "Container restart failed"
+            return 1
+        fi
+        if wait_for_api; then
+            ok "AegisDNS updated and running"
+        else
+            warn "Restarted but API not responding — check logs"
+        fi
+    else
+        info "Not running — start with: aegis start"
+    fi
+    echo ""
+}
+
+cmd_reset() {
+    hdr "${YELLOW}Reset AegisDNS${NC}"
+    echo -e "  This will wipe ALL data and start fresh:"
+    echo -e "    ${DIM}• Query logs & analytics${NC}"
+    echo -e "    ${DIM}• Registered devices${NC}"
+    echo -e "    ${DIM}• Policy rules (allow/deny)${NC}"
+    echo -e "    ${DIM}• Blocklist subscriptions${NC}"
+    echo -e "    ${DIM}• Schedule rules${NC}"
+    echo -e ""
+    echo -e "  ${GREEN}Keeping:${NC} Docker image, config.json, CLI"
+    echo ""
+    read -rp "  Are you sure? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Cancelled"
+        echo ""
+        return 0
+    fi
+    echo ""
+
+    require_docker
+
+    # Stop container and wipe volumes
+    cd "$AEGIS_DIR"
+    local was_running=false
+    if is_running; then
+        was_running=true
+        info "Stopping AegisDNS and wiping data volume..."
+    else
+        info "Wiping data volume..."
+    fi
+    
+    if ! docker_cmd compose down -v; then
+        fail "Could not remove the AegisDNS data volume"
+        return 1
+    fi
+    ok "Container stopped and all data wiped"
+
+    # Restart if it was running before
+    if $was_running; then
+        echo ""
+        info "Restarting AegisDNS with clean state..."
+        cd "$AEGIS_DIR"
+        if ! docker_cmd compose up -d || ! wait_for_api; then
+            fail "Data was reset, but AegisDNS did not restart successfully"
+            return 1
+        fi
+        ok "AegisDNS restarted with clean state"
+        activate_dns
+    fi
+
+    if $was_running; then
+        echo -e "\n  ${GREEN}${BOLD}Reset complete!${NC} AegisDNS is running with clean state."
+    else
+        echo -e "\n  ${GREEN}${BOLD}Reset complete!${NC} Start AegisDNS when you are ready."
+    fi
+    echo -e "  ${DIM}Add your devices back with: aegis device add <ip> <name>${NC}\n"
+}
+
+cmd_uninstall() {
+    hdr "${RED}Uninstall AegisDNS${NC}"
+    echo -e "  This will stop the container, restore your DNS, and clean up.\n"
+    read -rp "  Are you sure? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Cancelled"
+        echo ""
+        return 0
+    fi
+    echo ""
+
+    # Stop container
+    if is_running || container_exists; then
+        cd "$AEGIS_DIR"
+        if docker_cmd compose down; then ok "Container stopped"; else warn "Container cleanup failed"; fi
+    elif ! select_docker; then
+        warn "Docker is unavailable; continuing with host cleanup"
+    fi
+
+    # Restore DNS
+    restore_dns
+
+    # Remove docker volume
+    read -rp "  Remove stored data (policies, analytics, blocklists)? (y/N): " rmdata
+    if [[ "$rmdata" =~ ^[Yy]$ ]]; then
+        if ! select_docker; then
+            warn "Docker is unavailable, so the data volume could not be removed"
+        elif docker_cmd volume rm aegisdns_data 2>/dev/null; then
+            ok "Removed data volume"
+        else
+            warn "The Docker data volume was already absent or could not be removed"
+        fi
+    fi
+
+    # Remove CLI symlink
+    if [ -L /usr/local/bin/aegis ]; then
+        read -rp "  Remove 'aegis' command from system? (y/N): " rmcli
+        if [[ "$rmcli" =~ ^[Yy]$ ]]; then
+            sudo rm -f /usr/local/bin/aegis 2>/dev/null || true
+            ok "Removed /usr/local/bin/aegis"
+        fi
+    fi
+
+    # Cleanup backup
+    rm -rf "$BACKUP_DIR"
+    ok "Cleaned up backup files"
+
+    echo -e "\n  ${GREEN}AegisDNS has been uninstalled. Your DNS is back to normal.${NC}\n"
+}
+
+cmd_version() {
+    echo -e "AegisDNS CLI v${VERSION}"
+    if is_running; then
+        echo -e "Container: ${GREEN}running${NC}"
+    else
+        echo -e "Container: ${RED}stopped${NC}"
+    fi
+}
+
+# ── Help ────────────────────────────────────────────────────
+
+cmd_help() {
+    echo -e "
+${BOLD}AegisDNS CLI v${VERSION}${NC} — Control your DNS fortress
+
+${BOLD}USAGE${NC}
+  aegis <command> [args]
+
+${BOLD}CORE${NC}
+  ${CYAN}start${NC}                       Start AegisDNS and activate DNS blocking
+  ${CYAN}stop${NC}                        Stop AegisDNS and restore original DNS
+  ${CYAN}restart${NC}                     Restart the container (refreshes IP too)
+  ${CYAN}status${NC}                      Full system status at a glance
+
+${BOLD}BLOCKING${NC}
+  ${CYAN}allow${NC}   ${DIM}<domain> [device]${NC}   Whitelist a domain
+  ${CYAN}deny${NC}    ${DIM}<domain> [device]${NC}   Block a domain
+  ${CYAN}remove${NC}  ${DIM}<domain> [device]${NC}   Remove an allow/deny rule
+  ${CYAN}policy${NC}                      Show all current rules
+  ${CYAN}safesearch${NC} ${DIM}[on|off]${NC}        Toggle SafeSearch enforcement
+
+${BOLD}MONITORING${NC}
+  ${CYAN}stats${NC}   ${DIM}[device-ip]${NC}         Query stats + top domains
+  ${CYAN}device add${NC} ${DIM}<ip> <name>${NC}       Register a device (e.g. phone, laptop)
+  ${CYAN}device remove${NC} ${DIM}<ip>${NC}            Unregister a device
+  ${CYAN}device list${NC}                  List all registered devices
+  ${CYAN}logs${NC}    ${DIM}[N]${NC}                 Show last N log lines (default: 50)
+  ${CYAN}logs -f${NC}                     Follow logs live
+  ${CYAN}quarantine${NC}                  Show quarantined devices
+  ${CYAN}unquarantine${NC} ${DIM}<ip>${NC}           Release a device from quarantine
+
+${BOLD}TOOLS${NC}
+  ${CYAN}test${NC}    ${DIM}[domain]${NC}            Test if DNS resolution & blocking work
+  ${CYAN}risk${NC}    ${DIM}<domain>${NC}             Analyze domain threat risk score
+  ${CYAN}dashboard${NC}                   Open web dashboard in browser
+  ${CYAN}credentials${NC}                 Show the generated dashboard login
+  ${CYAN}ip${NC}                          Show all network/IP info
+  ${CYAN}config${NC}  ${DIM}[show|reset]${NC}        View or reset config files
+  ${CYAN}flush${NC}   ${DIM}[timeframe]${NC}         Clear query logs
+
+${BOLD}MANAGEMENT${NC}
+  ${CYAN}build${NC}                       Build the Docker image
+  ${CYAN}rebuild${NC}                     Build from scratch (no cache)
+  ${CYAN}update${NC}                      Git pull + rebuild + restart
+  ${CYAN}reset${NC}                       ${YELLOW}Wipe all data${NC} — logs, devices, policies, lists
+  ${CYAN}uninstall${NC}                   Full cleanup — stop, restore DNS, wipe
+  ${CYAN}version${NC}                     Show version info
+  ${CYAN}help${NC}                        Show this help
+
+${BOLD}EXAMPLES${NC}
+  aegis start                     ${DIM}# Start blocking${NC}
+  aegis stop                      ${DIM}# Stop and restore normal DNS${NC}
+  aegis device add 100.64.0.1 Phone  ${DIM}# Register your phone${NC}
+  aegis device add 100.64.0.2 Laptop ${DIM}# Register your laptop${NC}
+  aegis device list               ${DIM}# See all registered devices${NC}
+  aegis deny facebook.com         ${DIM}# Block facebook globally${NC}
+  aegis deny tiktok.com 10.0.0.5  ${DIM}# Block tiktok for one device${NC}
+  aegis allow youtube.com         ${DIM}# Whitelist youtube${NC}
+  aegis stats                     ${DIM}# Global stats${NC}
+  aegis stats 100.64.0.1          ${DIM}# Stats for a specific device${NC}
+  aegis test google.com           ${DIM}# Verify DNS works${NC}
+  aegis risk sketchy-site.xyz     ${DIM}# Check threat score${NC}
+  aegis safesearch on             ${DIM}# Force SafeSearch${NC}
+  aegis logs -f                   ${DIM}# Watch logs live${NC}
+"
+}
+
+# ── Main ────────────────────────────────────────────────────
+case "${1:-help}" in
+    start)                          cmd_start ;;
+    stop)                           cmd_stop ;;
+    restart)                        cmd_restart ;;
+    status|st)                      cmd_status ;;
+    logs|log)
+        if [ "${2:-}" = "-f" ] || [ "${2:-}" = "--follow" ]; then
+            cmd_logs_follow
+        else
+            cmd_logs "${2:-50}"
+        fi
+        ;;
+    build)                          cmd_build ;;
+    rebuild)                        cmd_rebuild ;;
+    allow|whitelist)                cmd_allow "${2:-}" "${3:-}" ;;
+    deny|block)                     cmd_deny "${2:-}" "${3:-}" ;;
+    remove|unallow|unblock)         cmd_remove "${2:-}" "${3:-}" ;;
+    policy|rules)                   cmd_policy ;;
+    stats)                          cmd_stats "${2:-}" ;;
+    device)                         cmd_device "${2:-}" "${3:-}" "${4:-}" ;;
+    devices)                        cmd_devices ;;
+    test|check)                     cmd_test "${2:-}" ;;
+    risk|scan)                      cmd_risk "${2:-}" ;;
+    quarantine)                     cmd_quarantine ;;
+    unquarantine|release)           cmd_unquarantine "${2:-}" ;;
+    safesearch|safe)                cmd_safesearch "${2:-}" ;;
+    flush|clear)                    cmd_flush "${2:-all}" ;;
+    ip|network)                     cmd_ip ;;
+    config|cfg)                     cmd_config "${2:-show}" ;;
+    dashboard|dash|ui|web)          cmd_dashboard ;;
+    credentials|credential|password) cmd_credentials ;;
+    update|upgrade)                 cmd_update ;;
+    reset)                          cmd_reset ;;
+    uninstall)                      cmd_uninstall ;;
+    version|-v|--version)           cmd_version ;;
+    help|-h|--help)                 cmd_help ;;
+    *)
+        fail "Unknown command: $1"
+        echo -e "     Run ${DIM}aegis help${NC} for all commands\n"
+        exit 1
+        ;;
+esac

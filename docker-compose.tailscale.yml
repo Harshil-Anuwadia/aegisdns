@@ -1,0 +1,8 @@
+# Optional peer discovery. The Tailscale LocalAPI socket grants more authority
+# than a read-only status feed, so it is deliberately excluded from the secure
+# default deployment. Enable this override only when dashboard auto-discovery
+# is worth that trust boundary on the host.
+services:
+  aegisdns:
+    volumes:
+      - /var/run/tailscale:/var/run/tailscale:ro

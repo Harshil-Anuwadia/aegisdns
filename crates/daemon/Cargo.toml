@@ -1,0 +1,35 @@
+[package]
+name = "aegisdnsd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+moka.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hickory-proto = "0.26.1"
+resolver = { path = "../resolver" }
+config = { path = "../config" }
+analytics = { path = "../analytics" }
+policy = { path = "../policy" }
+blocklist = { path = "../blocklist" }
+
+diagnostics = { path = "../diagnostics" }
+serde.workspace = true
+serde_json.workspace = true
+axum = "0.7"
+futures-util = "0.3"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+reqwest.workspace = true
+once_cell = "1.21.4"
+risk = { path = "../risk" }
+dhcp4r = "0.2.3"
+base64 = "0.21.5"
+
+rand = "0.10"
+subtle = "2.6"
+
+socket2 = "0.6"
+sha2 = "0.10"

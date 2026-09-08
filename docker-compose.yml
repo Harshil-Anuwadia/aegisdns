@@ -1,0 +1,57 @@
+services:
+  aegisdns:
+    build:
+      context: .
+      network: host
+    container_name: aegisdns
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    environment:
+      AEGIS_HOST_IP: ${AEGIS_HOST_IP:-}
+      AEGIS_ADMIN_PASSWORD: ${AEGIS_ADMIN_PASSWORD:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - aegisdns_data:/var/lib/aegisdns
+      - ./config.json:/app/config.json:ro
+      - ./blocklists:/var/lib/aegisdns/blocklists:ro
+      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro
+    cap_drop:
+      - ALL
+    # Used by the entrypoint only to migrate file ownership and drop to uid 10001.
+    # The daemon retains NET_BIND_SERVICE only, for DNS and optional DHCP.
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 15s
+
+  openroot:
+    build:
+      context: .
+      dockerfile: Dockerfile.openroot
+      network: host
+    container_name: openroot
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    user: "10001:10001"
+    volumes:
+      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+
+volumes:
+  aegisdns_data:
