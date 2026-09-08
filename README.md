@@ -5,7 +5,7 @@
 <h1 align="center">AegisDNS</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.0_%22Vanguard%22-00E5FF?style=for-the-badge&labelColor=111111" alt="v1.0 Vanguard">
+  <img src="https://img.shields.io/badge/Release-v1.0_%22Vanguard%22-1A73E8?style=for-the-badge&labelColor=111111" alt="v1.0 Vanguard">
 </p>
 
 <p align="center">
