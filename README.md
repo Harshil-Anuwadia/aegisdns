@@ -4,6 +4,8 @@
 
 <h1 align="center">AegisDNS</h1>
 
+<p align="center"><strong>v1.0 "Keystone"</strong></p>
+
 <p align="center">
   A self-hosted DNS firewall that actually catches zero-day threats.<br>
   No cloud. No subscription. No selling your query history.<br>
@@ -25,11 +27,11 @@
 
 I got tired of the tradeoff.
 
-Every DNS service that actually protects you — the ones that catch phishing, block malware callbacks, detect botnets — they all want your data. Your entire browsing history flows through their servers, gets logged, gets "anonymized" (sure), and you pay a monthly fee for the privilege of handing it over.
+Every DNS service that actually protects you (the ones that catch phishing, block malware callbacks, and detect botnets) wants your data. Your entire browsing history flows through their servers, gets logged, gets "anonymized" (sure), and you pay a monthly fee for the privilege of handing it over.
 
 Pi-hole is self-hosted, which is great for privacy. But it only checks domains against a static text file. If a piece of malware generates a random domain name five minutes from now, Pi-hole will let it through because no human has added it to a list yet.
 
-So I built AegisDNS. It runs on your own machine. Your DNS queries never leave your network. And instead of relying only on lists, it does real math on every query — Shannon entropy to catch algorithmically generated malware domains, Levenshtein distance to catch phishing lookalikes, IP rotation tracking to catch botnets. The same techniques that commercial DNS firewalls charge enterprise customers for. Except this is free, it's open source, and your data stays yours.
+So I built AegisDNS. It runs on your own machine. Your DNS queries never leave your network. And instead of relying only on lists, it does real math on every query: Shannon entropy to catch algorithmically generated malware domains, Levenshtein distance to catch phishing lookalikes, and IP rotation tracking to catch botnets. The same techniques that commercial DNS firewalls charge enterprise customers for. Except this is free, it's open source, and your data stays yours.
 
 Privacy is a right. Not a subscription.
 
@@ -39,7 +41,7 @@ Privacy is a right. Not a subscription.
 
 I used AI tools to help write parts of this codebase. I'm not going to hide that or pretend otherwise.
 
-AI helped me move faster, catch edge cases, and write better Rust. But every architectural decision — the entropy thresholds, the SSRF protections, the DHCP-to-device-registry integration, the policy evaluation order — that's all intentional design work. I reviewed, tested, and understood every line that went into this project.
+AI helped me move faster, catch edge cases, and write better Rust. But every architectural decision, from the entropy thresholds to the SSRF protections and the policy evaluation order, is intentional design work. I reviewed, tested, and understood every line that went into this project.
 
 I think the "did you use AI" debate misses the point. The point is: does the code work? Is it secure? Does it solve a real problem? I'll let the source code answer that.
 
@@ -47,7 +49,7 @@ I think the "did you use AI" debate misses the point. The point is: does the cod
 
 ## Install it
 
-You need a Linux machine with Docker. A Raspberry Pi 4, an old laptop, a VPS — anything works.
+You need a Linux machine with Docker. A Raspberry Pi 4, an old laptop, a VPS; anything works.
 
 ```bash
 git clone https://github.com/Harshil-Anuwadia/aegisdns.git
@@ -85,21 +87,21 @@ docker exec aegisdns cat /var/lib/aegisdns/admin-password
 
 Most DNS blockers are glorified `grep` commands. They download a list of known bad domains, and if a query matches, they block it. That worked in 2015. It doesn't work now.
 
-Modern malware doesn't use `evil-malware.com`. It generates random domain names on the fly — `xk7m2qzp9a.xyz` — and rotates through thousands of them. By the time a human researcher finds one and adds it to a blocklist, the malware has already moved on to the next hundred.
+Modern malware doesn't use `evil-malware.com`. It generates random domain names on the fly (`xk7m2qzp9a.xyz`) and rotates through thousands of them. By the time a human researcher finds one and adds it to a blocklist, the malware has already moved on to the next hundred.
 
 AegisDNS doesn't just check lists. It thinks.
 
 ### Malware detection (DGA)
-Every DNS query gets scored using **Shannon entropy** — a mathematical measure of randomness. Normal domains like `google.com` have low entropy. Machine-generated domains like `xk7m2qzp9a.xyz` have high entropy. AegisDNS catches them in real time, before any blocklist knows they exist.
+Every DNS query gets scored using **Shannon entropy**, a mathematical measure of randomness. Normal domains like `google.com` have low entropy. Machine-generated domains like `xk7m2qzp9a.xyz` have high entropy. AegisDNS catches them in real time, before any blocklist knows they exist.
 
 ### Phishing detection (Typosquatting)
 AegisDNS calculates the **Levenshtein distance** against 50+ high-value brands (banks, payment processors, crypto exchanges). If someone tries to visit `paypa1-secure-login.com`, AegisDNS strips common phishing suffixes (`-secure`, `-login`, `-verify`), measures the edit distance to `paypal`, and blocks it instantly.
 
 ### Botnet detection (Fast-Flux)
-Botnets hide their command servers behind rapidly rotating IP addresses — a technique called Fast-Flux. AegisDNS tracks IP history for every domain in a sliding 10-minute window with LRU eviction. If a single domain resolves to 5+ unique IPs in that window, it gets flagged. Major CDNs (Google, Cloudflare, Akamai) are whitelisted to prevent false positives.
+Botnets hide their command servers behind rapidly rotating IP addresses using a technique called Fast-Flux. AegisDNS tracks IP history for every domain in a sliding 10-minute window with LRU eviction. If a single domain resolves to 5+ unique IPs in that window, it gets flagged. Major CDNs (Google, Cloudflare, Akamai) are whitelisted to prevent false positives.
 
 ### Everything stays local
-Your DNS queries never touch a third-party server for analysis. The entropy math, the string distance, the IP tracking — it all runs locally on your hardware. The only outbound connections AegisDNS makes are recursive DNS resolution (to the actual DNS root servers or your configured forwarder) and blocklist downloads (HTTPS only).
+Your DNS queries never touch a third-party server for analysis. The entropy math, the string distance, the IP tracking; it all runs locally on your hardware. The only outbound connections AegisDNS makes are recursive DNS resolution (to the actual DNS root servers or your configured forwarder) and blocklist downloads (HTTPS only).
 
 ---
 
@@ -108,7 +110,7 @@ Your DNS queries never touch a third-party server for analysis. The entropy math
 ### DNS & Resolution
 - Full **recursive DNS resolution** through a supervised Unbound instance
 - **DNSSEC** validation with automatic root trust anchor management
-- **QNAME minimisation** — upstream servers only see the minimum they need
+- **QNAME minimisation**: upstream servers only see the minimum they need
 - **UDP and TCP** with automatic TCP fallback for truncated responses
 - Configurable **DNS-over-TLS** forwarding (e.g., `tls://9.9.9.9:853#dns.quad9.net`)
 - Per-client **rate limiting** (12,000 queries/60s) to contain DNS abuse
@@ -119,15 +121,15 @@ Your DNS queries never touch a third-party server for analysis. The entropy math
 - **Levenshtein distance** for typosquatting/phishing protection
 - **Fast-Flux IP tracking** with LRU eviction and CDN whitelisting
 - **SSRF protection** on webhooks and blocklist fetches (no private IP resolution, no redirects)
-- **Shell injection prevention** — commands are JSON argument arrays, never shell strings
-- **Token hashing** — action tokens stored as SHA-256, verified with constant-time comparison
+- **Shell injection prevention**: commands are JSON argument arrays, never shell strings
+- **Token hashing**: action tokens stored as SHA-256, verified with constant-time comparison
 
 ### Policy & Filtering
 - Global and **per-device** allow/deny rules
 - **Time-based schedules** with overnight wrap-around support
 - **SafeSearch** enforcement
 - Blocklists: hosts files, AdBlock syntax, exception rules (`@@||allowed.example^`)
-- **Last-known-good snapshots** — a failed blocklist download never wipes your active rules
+- **Last-known-good snapshots**: a failed blocklist download never wipes your active rules
 - Local zone forwarding (`.lan`, `.aegis`, `.home.arpa`)
 
 ### Analytics & Dashboard
@@ -135,7 +137,7 @@ Your DNS queries never touch a third-party server for analysis. The entropy math
 - Per-second telemetry: queries, blocks, cache hits, latency
 - **Per-device dashboards** with top domains, blocked domains, and insights
 - Domain insights: first seen, last seen, request breakdown by device
-- **Heuristic domain classification** — automatically groups CDN/infrastructure noise without hardcoded lists
+- **Heuristic domain classification**: automatically groups CDN/infrastructure noise without hardcoded lists
 - SQLite with WAL mode, async batched writes (DNS resolution is never blocked by disk I/O)
 - 30-day retention + 1M row hard cap (safe for Raspberry Pi SD cards)
 - CSV/JSON export
@@ -143,7 +145,7 @@ Your DNS queries never touch a third-party server for analysis. The entropy math
 ### Networking
 - Built-in **DHCP server** with automatic device hostname registration
 - **Tailscale** integration for remote access and peer discovery
-- Custom **DNS Action Engine** — trigger webhooks or sandboxed scripts from DNS queries
+- Custom **DNS Action Engine**: trigger webhooks or sandboxed scripts from DNS queries
 - Host networking preserves real client IPs (no Docker NAT masking)
 
 ### Hardening
@@ -180,7 +182,7 @@ I'm not going to pretend AegisDNS is perfect or that the alternatives are trash.
 **The short version:**
 - **Pi-hole** is a great ad blocker. It is not a security tool. It has zero algorithmic threat detection.
 - **AdGuard Home** is a modern Pi-hole with better UX and DoH/DoT support. But its open-source version still relies entirely on static lists for threat detection.
-- **NextDNS** has excellent security — but you're sending every URL you visit to a company's servers. For some people that's fine. For me, it defeats the entire point.
+- **NextDNS** has excellent security, but you're sending every URL you visit to a company's servers. For some people that's fine. For me, it defeats the entire point.
 - **AegisDNS** gives you NextDNS-level threat detection running entirely on your own hardware. Your data never leaves your network.
 
 ---
@@ -220,7 +222,7 @@ AegisDNS is a Rust workspace with clean crate boundaries:
 
 ## Configuration
 
-The installer creates `.env` and `config.json`. The only required value is `AEGIS_HOST_IP` — an IP address your clients can reach (usually your Tailscale or LAN IP).
+The installer creates `.env` and `config.json`. The only required value is `AEGIS_HOST_IP`: an IP address your clients can reach (usually your Tailscale or LAN IP).
 
 ```json
 {
@@ -234,7 +236,7 @@ The installer creates `.env` and `config.json`. The only required value is `AEGI
 
 ### Upstream DNS
 
-By default, Unbound resolves from the DNS root — no third-party forwarder involved. You can configure a forwarder in the dashboard:
+By default, Unbound resolves from the DNS root; no third-party forwarder involved. You can configure a forwarder in the dashboard:
 
 ```
 tls://9.9.9.9:853#dns.quad9.net
@@ -287,7 +289,7 @@ If you expose the dashboard beyond localhost, put it behind a TLS reverse proxy 
 
 ## Custom actions
 
-AegisDNS lets you trigger real-world actions when a DNS query matches a custom domain. No other DNS server does this.
+AegisDNS lets you trigger real-world actions when a DNS query matches a custom domain. This is genuinely unique; no other DNS server does this.
 
 Register `.aegis`, `.lan`, `.root`, or `.home.arpa` domains as action triggers. When queried, they can fire a webhook, run a sandboxed script, or serve a custom HTML page.
 
@@ -298,7 +300,7 @@ curl -X POST http://deploy.aegis:5381 \
   -d '{"version": "1.2.3"}'
 ```
 
-Shell actions are disabled by default. Each executable must be explicitly allowlisted in `AEGIS_ACTION_EXECUTABLES`. Commands are JSON arrays — they never pass through a shell. Action tokens are stored as SHA-256 hashes and verified with constant-time comparison.
+Shell actions are disabled by default. Each executable must be explicitly allowlisted in `AEGIS_ACTION_EXECUTABLES`. Commands are JSON arrays and never pass through a shell. Action tokens are stored as SHA-256 hashes and verified with constant-time comparison.
 
 ---
 
@@ -312,7 +314,7 @@ cargo test --workspace --locked
 
 The release binary lands at `target/release/aegisdnsd`.
 
-For production, use the Docker image — it includes Unbound, trust anchors, and runs in a hardened container:
+For production, use the Docker image. It includes Unbound, trust anchors, and runs in a hardened container:
 
 ```bash
 docker compose build
@@ -345,6 +347,6 @@ If you find a security vulnerability, please open a private security advisory on
 
 ## License
 
-[MIT](LICENSE) — do whatever you want with it.
+[MIT](LICENSE): do whatever you want with it.
 
 Privacy shouldn't cost money. This code is free, and it always will be.
