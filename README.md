@@ -4,7 +4,9 @@
 
 <h1 align="center">AegisDNS</h1>
 
-<p align="center"><strong>v1.0 "Keystone"</strong></p>
+<p align="center">
+  <img src="https://img.shields.io/badge/Release-v1.0_%22Vanguard%22-00E5FF?style=for-the-badge&labelColor=111111" alt="v1.0 Vanguard">
+</p>
 
 <p align="center">
   A self-hosted DNS firewall that actually catches zero-day threats.<br>
