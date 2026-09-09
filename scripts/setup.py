@@ -30,8 +30,10 @@ class SetupError(Exception):
 
 class UI:
     def __init__(self, plain=False):
-        self.tty = sys.stdout.isatty() and os.environ.get('TERM') != 'dumb' and not plain
-        self.color = self.tty and 'NO_COLOR' not in os.environ
+        # The installer has an explicit --plain mode. Interactive runs use color
+        # even when a parent application exports TERM=dumb or NO_COLOR globally.
+        self.tty = sys.stdout.isatty() and not plain
+        self.color = self.tty
         self.motion = self.tty and not os.environ.get('AEGIS_NO_ANIMATION')
         if WINDOWS and self.tty:
             try:
@@ -61,21 +63,19 @@ class UI:
     def welcome(self, uninstall=False):
         print()
         self.say(self.ink('AEGISDNS', '1;36'))
-        self.say('REMOVE WITH CARE' if uninstall else 'A NETWORK OF YOUR OWN')
-        self.say('─' * min(54, max(22, shutil.get_terminal_size((80, 24)).columns - 6)))
-        self.say('Let’s leave your system in good shape.' if uninstall else 'Welcome. Let’s get your DNS server ready.')
-        self.say('Your settings stay yours. Each step is shown below.')
+        self.say('Safe removal' if uninstall else 'Secure DNS for your network')
         print()
 
     def step(self, index, total, title):
-        filled = (index - 1) * 16 // total
-        self.say(f'[{"=" * filled}{"." * (16-filled)}]  {index}/{total}  {title}')
+        if index > 1:
+            print()
+        self.say(self.ink(f'{index:02d}', '1;36') + '  ' + self.ink(title, '1;37') + '  ' + self.ink(f'{index}/{total}', '2'))
 
     def done(self, message):
-        self.say(self.ink('✓', '32') + ' ' + message)
+        self.say(self.ink('✓ ' + message, '1;32'))
 
     def warn(self, message):
-        self.say('! ' + message)
+        self.say(self.ink('!  ' + message, '1;33'))
 
     def confirm(self, question, yes=False, default=False, word=None):
         if yes:
@@ -83,7 +83,7 @@ class UI:
         if not sys.stdin.isatty():
             raise SetupError('No interactive input. Review --help, then use --yes for an unattended run.')
         suffix = f' Type {word}: ' if word else (' [Y/n] ' if default else ' [y/N] ')
-        self.say(question)
+        self.say(self.ink(question, '1;37'))
         try:
             answer = input('  ' + suffix).strip()
         except EOFError:
@@ -120,7 +120,9 @@ class Runner:
                     if elapsed > timeout:
                         raise SetupError(f'{Path(args[0]).name} exceeded the {timeout}s timeout.')
                     if self.ui.motion:
-                        print(f'\r\033[2K  {spinner[frame % 4]} Working / {elapsed}s', end='', flush=True)
+                        status = self.ui.ink(spinner[frame % 4], '1;36')
+                        elapsed_text = self.ui.ink(f'{elapsed}s', '2')
+                        print(f'\r\033[2K  {status} Working  {elapsed_text}', end='', flush=True)
                         frame += 1
                     time.sleep(.15)
                 output.seek(0)
@@ -267,13 +269,16 @@ class Setup:
         self.docker = ['docker']
         self.compose = []
         self.started = False
+        self.sudo_announced = False
 
     def sudo(self):
         if WINDOWS:
             return []
         if not shutil.which('sudo'):
             raise SetupError('sudo is required. Install sudo, then run setup as your regular user.')
-        self.ui.say('Authorize host changes with sudo. Your password is not logged.')
+        if not self.sudo_announced:
+            self.ui.say('Administrator permission is required for host DNS and the aegis command.')
+            self.sudo_announced = True
         command = ['sudo', '-n', 'true'] if self.args.yes else ['sudo', '-v']
         self.runner.run(command, interactive=not self.args.yes, timeout=120)
         return ['sudo', '-n'] if self.args.yes else ['sudo']
@@ -434,10 +439,9 @@ class Setup:
     def install(self):
         self.ui.step(1, 6, 'Check this machine')
         self.requirements()
-        self.ui.say(f'Location: {ROOT}')
-        self.ui.say('Plan: validate configuration, build images, install the CLI' + ('.' if self.args.no_start else ', start and verify DNS.'))
+        self.ui.say(f'Install from {ROOT}')
         if not WINDOWS and not self.args.no_start:
-            self.ui.say('Starting backs up and changes this host’s DNS. Routers and other devices are not reconfigured.')
+            self.ui.say('This changes this host’s DNS. Your router and other devices are untouched.')
         if self.args.install_deps:
             self.ui.say('Missing Docker or requested Tailscale will be installed using official scripts.')
         if not self.ui.confirm('Continue with this plan?', self.args.yes, default=True):
@@ -453,7 +457,6 @@ class Setup:
         self.ui.step(3, 6, 'Prepare your configuration')
         self.selected_ip = self.address()
         if not self.args.yes and not self.args.ip:
-            self.ui.say('Use a stable address so your devices can keep finding this server.')
             try:
                 answer = input(f'  Server IPv4 [{self.selected_ip}]: ').strip()
             except EOFError:
@@ -467,11 +470,10 @@ class Setup:
         self.ui.done(f'DNS address: {self.selected_ip}. Existing settings preserved.')
         self.runner.run(self.compose + ['config', '--quiet'], timeout=25)
         self.ui.step(4, 6, 'Build AegisDNS')
-        self.ui.say('The first build can take several minutes. Progress below shows completed setup steps, not a build-time estimate.')
+        self.ui.say('The first build may take a few minutes.')
         self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []), timeout=self.args.build_timeout)
-        self.ui.done('Images built successfully')
-        self.ui.say('Checking that the unprivileged container can read its mounted configuration…')
         self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'], timeout=60)
+        self.ui.done('Images and configuration verified')
         self.ui.step(5, 6, 'Install the command')
         if not WINDOWS:
             # This command may prompt even after validation when sudoers uses a
@@ -485,20 +487,19 @@ class Setup:
                 self.runner.run(self.compose + ['up', '-d'], timeout=180)
             else:
                 self.cli('restart')
-            self.ui.say('Waiting for authenticated administration and DNS over UDP + TCP…')
+            self.ui.say('Checking dashboard and DNS…')
             self.ready()
             self.started = False
-            self.ui.done('Dashboard protected. DNS is answering over UDP and TCP.')
-        self.ui.say('[================]  Complete')
-        self.ui.say('Thank you for making AegisDNS part of your network.')
+            self.ui.done('DNS is answering; dashboard is protected')
+        print()
+        self.ui.say(self.ui.ink('AegisDNS is ready', '1;32'))
         if self.args.no_start:
             self.ui.say('Start when ready: docker compose up -d' if WINDOWS else 'Start when ready: aegis start')
         else:
-            self.ui.say('Dashboard: http://localhost:5380 · Username: admin')
-        self.ui.say('Retrieve your password: docker exec aegisdns cat /var/lib/aegisdns/admin-password' if WINDOWS else 'Retrieve your password: aegis credentials')
-        self.ui.say(f'Try one device with DNS set to {self.selected_ip} before changing the rest of your network.')
-        self.ui.say('Remote dashboard access: use an SSH tunnel to port 5380. The dashboard is local to the DNS host.')
-        self.ui.say('Uninstall later: uninstall.bat' if WINDOWS else 'Uninstall later: aegis uninstall')
+            self.ui.say('Dashboard   http://localhost:5380')
+        self.ui.say('Credentials docker exec aegisdns cat /var/lib/aegisdns/admin-password' if WINDOWS else 'Credentials aegis credentials')
+        self.ui.say(f'DNS address {self.selected_ip}')
+        self.ui.say('Next: test this address on one device.')
 
     def uninstall(self):
         self.ui.step(1, 4, 'Review removal')
@@ -528,9 +529,9 @@ class Setup:
                 self.sudo_run('rm', '--', target, timeout=15)
             elif target.exists() or target.is_symlink():
                 self.ui.warn('The aegis command belongs to another installation; it was left in place.')
-        self.ui.say('[================]  Complete')
-        self.ui.say('AegisDNS has been removed. Thank you for trying it.')
-        self.ui.say('Your source and configuration are still here if you decide to return.')
+        print()
+        self.ui.say(self.ui.ink('AegisDNS removed', '1;32'))
+        self.ui.say('Source and configuration remain in this directory.')
 
     def recover(self):
         if not self.started:
@@ -607,7 +608,6 @@ def main(argv=None):
             backup = Path(tempfile.mkdtemp(prefix=f'{args.action}-', dir=state))
             log = backup / 'setup.log'
             log.touch(mode=0o600)
-            ui.say(f'Private log and configuration backup: {backup}')
             setup = Setup(args, ui, Runner(ui, log), backup)
             if args.action == 'install':
                 setup.install()

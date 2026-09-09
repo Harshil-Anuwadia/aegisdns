@@ -282,7 +282,7 @@ export default function Overview() {
                 className="destination"
               >
                 <span className="domain-monogram">
-                  {d.domain[0].toUpperCase()}
+                  {d.domain?.charAt(0).toUpperCase()}
                 </span>
                 <div>
                   <strong>{d.domain}</strong>
