@@ -32,4 +32,6 @@ rand = "0.10"
 subtle = "2.6"
 
 socket2 = "0.6"
+ipnet.workspace = true
 sha2 = "0.10"
+libc = "0.2"

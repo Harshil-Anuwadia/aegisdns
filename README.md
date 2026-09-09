@@ -1,354 +1,307 @@
 <p align="center">
-  <img src="assets/AegisDNS.png" alt="AegisDNS" width="280">
+  <img src="assets/AegisDNS.png" alt="AegisDNS" width="220">
 </p>
 
 <h1 align="center">AegisDNS</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.0_%22Keystone%22-2563EB?style=for-the-badge&labelColor=111111" alt="v1.0 Keystone">
+  Self-hosted DNS filtering, privacy controls, and network visibility.<br>
+  Built with Rust and Unbound. Free and open source under the MIT license.
 </p>
 
 <p align="center">
-  A self-hosted DNS firewall that actually catches zero-day threats.<br>
-  No cloud. No subscription. No selling your query history.<br>
-  Just you, your hardware, and math.
-</p>
-
-<p align="center">
-  <a href="#install-it">Install</a> •
-  <a href="#what-makes-aegisdns-different">Why AegisDNS</a> •
-  <a href="#features">Features</a> •
-  <a href="#the-honest-comparison">Comparison</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#troubleshooting">Help</a>
+  <a href="#quick-start">Get started</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="TROUBLESHOOTING.md">Troubleshooting</a> ·
+  <a href="#contributing">Contribute</a> ·
+  <a href="https://github.com/sponsors/Harshil-Anuwadia">Sponsor</a>
 </p>
 
 ---
 
-## Why I built this
+AegisDNS gives you control over the DNS requests made by devices on your network. It combines domain filtering, device-specific rules, heuristic risk checks, and local query analytics with a validating Unbound resolver.
 
-I got tired of the tradeoff.
+Use the dashboard or CLI to investigate requests, adjust filtering, explore domain relationships, and manage privacy budgets. The complete software is free to download, modify, and self-host, including for commercial use. No subscription or project account is required to run it.
 
-Every DNS service that actually protects you (the ones that catch phishing, block malware callbacks, and detect botnets) wants your data. Your entire browsing history flows through their servers, gets logged, gets "anonymized" (sure), and you pay a monthly fee for the privilege of handing it over.
+## Features
 
-Pi-hole is self-hosted, which is great for privacy. But it only checks domains against a static text file. If a piece of malware generates a random domain name five minutes from now, Pi-hole will let it through because no human has added it to a list yet.
+| Area | Capabilities |
+| --- | --- |
+| **DNS resolution** | Recursive resolution through Unbound, DNSSEC validation, QNAME minimization, UDP/TCP, and optional DNS-over-TLS forwarding. |
+| **Filtering** | Global and per-device allow/deny rules, blocklists, scheduled rules, SafeSearch, and device filtering profiles. |
+| **Risk checks** | Domain-entropy scoring, typosquatting checks, IP-rotation tracking, response inspection, and per-client rate containment. |
+| **Query visibility** | Live feed using Server-Sent Events, recent request inspection, domain rankings, and CSV/JSON history exports. |
+| **Domain relationships** | An interactive graph of observed links between devices, domains, aliases, IP addresses, and related infrastructure. |
+| **Privacy budgets** | Per-device DNS exposure estimates with optional daily limits on recognized tracking activity. |
+| **Network management** | Optional DHCP, local DNS zones, device registration, and Tailscale peer discovery. |
+| **Integrations** | Optional Telegram alerts and authenticated custom endpoints for HTTPS webhooks, approved executables, or HTML responses. |
+| **Dashboard** | Responsive React interface, dark and light themes, keyboard command search, and explicit loading, empty, and error states. |
 
-So I built AegisDNS. It runs on your own machine. Your DNS queries never leave your network. And instead of relying only on lists, it does real math on every query: Shannon entropy to catch algorithmically generated malware domains, Levenshtein distance to catch phishing lookalikes, and IP rotation tracking to catch botnets. The same techniques that commercial DNS firewalls charge enterprise customers for. Except this is free, it's open source, and your data stays yours.
+Risk checks are heuristics. They can produce false positives and do not establish that a domain is malicious or safe. DNS filtering applies to requests that reach AegisDNS; it cannot inspect encrypted application content or control devices using a different resolver.
 
-Privacy is a right. Not a subscription.
+## Quick start
 
----
+### Requirements
 
-## A note about AI
+- A Linux host with a stable LAN or Tailscale address.
+- Git, curl, and a regular user account with sudo access.
+- Docker Engine and the Docker Compose plugin. The installer can install Docker when missing.
+- Port 53 available for DNS over both UDP and TCP.
 
-I used AI tools to help write parts of this codebase. I'm not going to hide that or pretend otherwise.
+The supplied Compose configuration uses Linux host networking to preserve client IP addresses. Windows includes an `install.bat` helper, but Docker Desktop networking can obscure client identity. Use native Linux when per-device filtering or DHCP is required.
 
-AI helped me move faster, catch edge cases, and write better Rust. But every architectural decision, from the entropy thresholds to the SSRF protections and the policy evaluation order, is intentional design work. I reviewed, tested, and understood every line that went into this project.
+### Install on Linux
 
-I think the "did you use AI" debate misses the point. The point is: does the code work? Is it secure? Does it solve a real problem? I'll let the source code answer that.
-
----
-
-## Install it
-
-You need a Linux machine with Docker. A Raspberry Pi 4, an old laptop, a VPS; anything works.
+Run these commands in a fresh checkout as your regular user, not as root:
 
 ```bash
 git clone https://github.com/Harshil-Anuwadia/aegisdns.git
 cd aegisdns
-./install.sh
-```
-
-That's it. The installer handles Docker, Tailscale (optional), and configuration. When it's done:
-
-```bash
-aegis start          # Start AegisDNS
-aegis credentials    # Get your admin password
-aegis dashboard      # Open the web UI
-```
-
-The dashboard runs on `http://localhost:5380`. Point your router's DNS to your AegisDNS machine's IP, and every device on your network is protected.
-
-**Without Tailscale:**
-```bash
+cp openroot.example.json openroot.json
 ./install.sh --no-tailscale
 ```
 
-**Manual Docker deployment:**
+The local-zone configuration must exist before installation. For an existing checkout, retain your own `openroot.json` rather than replacing it with the example.
+
+The installer prepares host configuration, builds the containers, and installs the `aegis` CLI. It requests sudo access for host changes. To use its Tailscale setup, run `./install.sh` without `--no-tailscale` instead.
+
+Start the service and retrieve your dashboard credentials:
+
 ```bash
-docker compose build
-docker compose up -d
+aegis start
+aegis status
+aegis credentials
+```
+
+Open **http://localhost:5380** on the DNS host and sign in as **`admin`**. If you supplied `AEGIS_ADMIN_PASSWORD`, use that password instead of the generated credential.
+
+For a remote host, use an SSH tunnel to reach the loopback-only dashboard:
+
+```bash
+ssh -L 5380:127.0.0.1:5380 user@dns-host
+```
+
+Then open `http://localhost:5380` on your own computer.
+
+### Verify before changing network DNS
+
+Using `dig`, check both transports on the DNS host:
+
+```bash
+dig @127.0.0.1 example.com
+dig @127.0.0.1 example.com +tcp
+```
+
+Once resolution works, configure a test device to use the host's reachable IP address as its DNS server. Confirm that its requests appear in the query log before changing your router's DHCP settings or the rest of your network. Keep the host's existing DNS working during the initial image build.
+
+### Manual Docker deployment
+
+From a fresh checkout, prepare the bind-mounted configuration files:
+
+```bash
+cp config.example.json config.json
+cp openroot.example.json openroot.json
+```
+
+Set `host_ips` in `config.json` for your host. Create a `.env` file with a reachable IPv4 address assigned to that host; replace the example below:
+
+```dotenv
+AEGIS_HOST_IP=192.168.1.10
+TZ=UTC
+```
+
+Then build and start the services:
+
+```bash
+docker compose up -d --build
+docker compose ps
 docker exec aegisdns cat /var/lib/aegisdns/admin-password
 ```
 
-**Windows / macOS:** `install.bat` runs the Linux image through Docker Desktop. Global policy works; per-device rules may not distinguish clients behind Docker's NAT layer. For full per-device support, use Linux with host networking.
+The Docker build includes the compiled dashboard and Unbound dependencies. Do not overwrite existing configuration files when updating an installation.
 
----
+## Everyday commands
 
-## What makes AegisDNS different
+| Command | Purpose |
+| --- | --- |
+| `aegis start` / `aegis stop` | Start or stop the service. |
+| `aegis restart` | Restart the service. |
+| `aegis status` | Inspect service status. |
+| `aegis logs -f` | Follow service logs. |
+| `aegis dashboard` | Open the dashboard. |
+| `aegis credentials` | Retrieve dashboard credentials. |
+| `aegis allow example.com` | Add a global allow rule. |
+| `aegis deny example.com` | Add a global deny rule. |
+| `aegis policy` | Inspect configured domain rules. |
+| `aegis devices` | List registered devices. |
+| `aegis help` | Show the full command reference. |
 
-Most DNS blockers are glorified `grep` commands. They download a list of known bad domains, and if a query matches, they block it. That worked in 2015. It doesn't work now.
+The dashboard also provides scoped device rules, schedules, blocklist management, privacy budgets, diagnostics, and settings. Use **Ctrl+K** or **⌘K** to navigate pages or investigate a domain.
 
-Modern malware doesn't use `evil-malware.com`. It generates random domain names on the fly (`xk7m2qzp9a.xyz`) and rotates through thousands of them. By the time a human researcher finds one and adds it to a blocklist, the malware has already moved on to the next hundred.
+## How it works
 
-AegisDNS doesn't just check lists. It thinks.
+```text
+Devices ── DNS / UDP + TCP :53 ──► AegisDNS
+                                  │
+                                  ├── Policy and risk checks
+                                  ├── Unbound :5353 ──► Authoritative DNS or configured forwarders
+                                  ├── Openroot :5354 ──► Local zone records
+                                  └── Local analytics and relationship observations
+                                               │
+                                      Dashboard / API :5380
 
-### Malware detection (DGA)
-Every DNS query gets scored using **Shannon entropy**, a mathematical measure of randomness. Normal domains like `google.com` have low entropy. Machine-generated domains like `xk7m2qzp9a.xyz` have high entropy. AegisDNS catches them in real time, before any blocklist knows they exist.
-
-### Phishing detection (Typosquatting)
-AegisDNS calculates the **Levenshtein distance** against 50+ high-value brands (banks, payment processors, crypto exchanges). If someone tries to visit `paypa1-secure-login.com`, AegisDNS strips common phishing suffixes (`-secure`, `-login`, `-verify`), measures the edit distance to `paypal`, and blocks it instantly.
-
-### Botnet detection (Fast-Flux)
-Botnets hide their command servers behind rapidly rotating IP addresses using a technique called Fast-Flux. AegisDNS tracks IP history for every domain in a sliding 10-minute window with LRU eviction. If a single domain resolves to 5+ unique IPs in that window, it gets flagged. Major CDNs (Google, Cloudflare, Akamai) are whitelisted to prevent false positives.
-
-### Everything stays local
-Your DNS queries never touch a third-party server for analysis. The entropy math, the string distance, the IP tracking; it all runs locally on your hardware. The only outbound connections AegisDNS makes are recursive DNS resolution (to the actual DNS root servers or your configured forwarder) and blocklist downloads (HTTPS only).
-
----
-
-## Features
-
-### DNS & Resolution
-- Full **recursive DNS resolution** through a supervised Unbound instance
-- **DNSSEC** validation with automatic root trust anchor management
-- **QNAME minimisation**: upstream servers only see the minimum they need
-- **UDP and TCP** with automatic TCP fallback for truncated responses
-- Configurable **DNS-over-TLS** forwarding (e.g., `tls://9.9.9.9:853#dns.quad9.net`)
-- Per-client **rate limiting** (12,000 queries/60s) to contain DNS abuse
-- Response validation: IDs, question matching, private-address rejection
-
-### Security Engine
-- **Shannon entropy scoring** for DGA/malware domain detection
-- **Levenshtein distance** for typosquatting/phishing protection
-- **Fast-Flux IP tracking** with LRU eviction and CDN whitelisting
-- **SSRF protection** on webhooks and blocklist fetches (no private IP resolution, no redirects)
-- **Shell injection prevention**: commands are JSON argument arrays, never shell strings
-- **Token hashing**: action tokens stored as SHA-256, verified with constant-time comparison
-
-### Policy & Filtering
-- Global and **per-device** allow/deny rules
-- **Time-based schedules** with overnight wrap-around support
-- **SafeSearch** enforcement
-- Blocklists: hosts files, AdBlock syntax, exception rules (`@@||allowed.example^`)
-- **Last-known-good snapshots**: a failed blocklist download never wipes your active rules
-- Local zone forwarding (`.lan`, `.aegis`, `.home.arpa`)
-
-### Analytics & Dashboard
-- **Real-time query log** with WebSocket live feed
-- Per-second telemetry: queries, blocks, cache hits, latency
-- **Per-device dashboards** with top domains, blocked domains, and insights
-- Domain insights: first seen, last seen, request breakdown by device
-- **Heuristic domain classification**: automatically groups CDN/infrastructure noise without hardcoded lists
-- SQLite with WAL mode, async batched writes (DNS resolution is never blocked by disk I/O)
-- 30-day retention + 1M row hard cap (safe for Raspberry Pi SD cards)
-- CSV/JSON export
-
-### Networking
-- Built-in **DHCP server** with automatic device hostname registration
-- **Tailscale** integration for remote access and peer discovery
-- Custom **DNS Action Engine**: trigger webhooks or sandboxed scripts from DNS queries
-- Host networking preserves real client IPs (no Docker NAT masking)
-
-### Hardening
-- Read-only container filesystem with tmpfs for `/run` and `/tmp`
-- All Linux capabilities dropped except `NET_BIND_SERVICE`
-- `no-new-privileges`, PID limit (256), non-root UID (10001)
-- HTTP security headers: CSP, HSTS, X-Frame-Options, CORS rejection
-- Same-origin enforcement via `X-Aegis-Request` header
-- 200ms delay on failed auth attempts (brute-force slowdown)
-- Atomic file writes with `fsync` + rename (no partial configs on crash)
-
----
-
-## The honest comparison
-
-I'm not going to pretend AegisDNS is perfect or that the alternatives are trash. Every tool has a purpose. Here's where they each shine and where they fall short.
-
-| | **AegisDNS** | **Pi-hole** | **AdGuard Home** | **NextDNS** |
-|:--|:--|:--|:--|:--|
-| **Runs on your hardware** | ✅ | ✅ | ✅ | ❌ Cloud only |
-| **Your queries stay private** | ✅ | ✅ | ✅ | ❌ Sent to their servers |
-| **DGA detection (entropy)** | ✅ Built-in | ❌ | ❌ | ✅ Cloud ML |
-| **Phishing detection (typosquatting)** | ✅ Built-in | ❌ | ❌ (paid DNS only) | ✅ Cloud ML |
-| **Fast-Flux / botnet detection** | ✅ Built-in | ❌ | ❌ | Partial |
-| **DNSSEC validation** | ✅ Local Unbound | ❌ Relies on upstream | ✅ | ✅ |
-| **Per-device policies** | ✅ With real client IPs | ✅ | ✅ | Limited (sees router IP) |
-| **Built-in DHCP** | ✅ Auto-registers hostnames | ✅ | ✅ | ❌ |
-| **Time-based schedules** | ✅ | ❌ | ✅ | ✅ |
-| **Custom DNS actions** | ✅ Webhooks + scripts | ❌ | ❌ | ❌ |
-| **Written in** | Rust | PHP + C (dnsmasq) | Go | Proprietary |
-| **Price** | Free forever | Free | Free | Freemium (300k queries/mo) |
-| **Open source** | ✅ MIT | ✅ GPL | ✅ GPL | ❌ |
-
-**The short version:**
-- **Pi-hole** is a great ad blocker. It is not a security tool. It has zero algorithmic threat detection.
-- **AdGuard Home** is a modern Pi-hole with better UX and DoH/DoT support. But its open-source version still relies entirely on static lists for threat detection.
-- **NextDNS** has excellent security, but you're sending every URL you visit to a company's servers. For some people that's fine. For me, it defeats the entire point.
-- **AegisDNS** gives you NextDNS-level threat detection running entirely on your own hardware. Your data never leaves your network.
-
----
-
-## Architecture
-
-```
-Client Device ──► AegisDNS (port 53) ──► Policy Engine ──► Unbound (port 5353) ──► Internet
-                       │                      │
-                       │                      ├── Blocklist check
-                       │                      ├── Per-device rules
-                       │                      ├── Schedule evaluation
-                       │                      ├── DGA entropy scoring
-                       │                      ├── Typosquatting check
-                       │                      └── Fast-Flux tracking
-                       │
-                       ├── Analytics DB (SQLite/WAL, async writes)
-                       ├── DHCP Server (optional, auto-registers devices)
-                       ├── Action Engine (webhooks, scripts)
-                       └── Dashboard (localhost:5380)
+Authenticated HTTP POST :5381 ──► Custom action endpoint
 ```
 
-AegisDNS is a Rust workspace with clean crate boundaries:
+Unbound handles external DNS resolution, validation, and response caching. AegisDNS applies policy before resolution and inspects returned data, including CNAME targets, against the requesting device's rules. Query records and relationship observations are stored locally in SQLite.
 
-| Crate | Purpose |
-|:--|:--|
-| `daemon` | DNS proxy, web server, DHCP, Tailscale integration |
-| `config` | Configuration, atomic writes, domain validation, address classification |
-| `policy` | Rule evaluation: schedules, device rules, global rules, typosquatting |
-| `risk` | DGA entropy scoring, Fast-Flux detection |
-| `analytics` | SQLite storage, query recording, telemetry, domain classification |
-| `blocklist` | List downloading, parsing (hosts/AdBlock), compilation, snapshotting |
-| `resolver` | Unbound lifecycle management, DNSSEC, upstream config generation |
-| `openroot` | Local zone DNS server for custom TLDs |
-
----
+Custom actions use a separate authenticated HTTP listener. **A DNS lookup does not execute a webhook or command.**
 
 ## Configuration
 
-The installer creates `.env` and `config.json`. The only required value is `AEGIS_HOST_IP`: an IP address your clients can reach (usually your Tailscale or LAN IP).
+The default container stores persistent application data under `/var/lib/aegisdns` in the `aegisdns_data` Compose volume. The repository's `config.json`, `openroot.json`, and `blocklists/` directory are bind-mounted separately.
 
-```json
-{
-  "host_ips": [
-    "127.0.0.1",
-    "192.168.1.100",
-    "100.x.x.x"
-  ]
-}
-```
+| Setting | Purpose |
+| --- | --- |
+| `AEGIS_HOST_IP` | Host IPv4 address used for custom-action DNS answers and the default action listener. Set by the installer or in `.env`. |
+| `AEGIS_ADMIN_PASSWORD` | Optional admin password override, 16–256 characters. Otherwise, a generated password is persisted in the data directory. |
+| `TZ` | Server timezone for schedules; the supplied Compose default is `UTC`. Daily analytics and privacy budgets use UTC. |
+| `AEGIS_ACTION_EXECUTABLES` | Colon-separated absolute executable paths permitted for shell-type actions. Empty by default. |
+| `AEGIS_IP_METADATA` | Optional path to a local CIDR/ASN/country metadata file. Defaults to `ip-metadata.csv` in the data directory. |
 
-### Upstream DNS
+The supplied Compose file forwards `AEGIS_HOST_IP`, `AEGIS_ADMIN_PASSWORD`, and `TZ`. To use another daemon environment setting, explicitly add it to the service's `environment` mapping in a Compose override and mount any required files. Adding a variable to `.env` alone does not pass it into the container.
 
-By default, Unbound resolves from the DNS root; no third-party forwarder involved. You can configure a forwarder in the dashboard:
+### Upstream resolution
 
-```
+By default, Unbound performs recursive resolution. In **Upstream DNS**, you can configure forwarding with either forward-first or forward-only behavior.
+
+Examples of supported endpoint formats:
+
+```text
+9.9.9.9:53
 tls://9.9.9.9:853#dns.quad9.net
 ```
 
-Both IP and TLS hostname are required. This prevents DNS bootstrap loops where the forwarder's own hostname would need resolution.
+Use one endpoint per line. Do not mix plaintext and TLS endpoints in the same configuration. DNS-over-TLS requires an IP address and certificate hostname; this forwarding configuration does not accept DoH URLs.
 
-### Tailscale
+### Tailscale and DHCP
 
-Add your AegisDNS machine's Tailscale IP as a nameserver in the Tailscale admin console with "Override local DNS" enabled. Every device on your tailnet is now protected.
-
-Peer discovery (auto-registering Tailscale devices) is opt-in because it expands container authority over the host Tailscale service:
+Clients can reach AegisDNS through a configured Tailscale connection without enabling automatic peer discovery. To enable discovery through the host's Tailscale LocalAPI socket, use the supplied opt-in override:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d
 ```
 
-### Environment variables
+The override grants the container access to the host Tailscale socket. See [troubleshooting](TROUBLESHOOTING.md#tailscale-peers-do-not-appear) for requirements.
 
-| Variable | Default | Purpose |
-|:--|:--|:--|
-| `AEGIS_HOST_IP` | Detected by installer | IP for action server binding and DNS responses |
-| `AEGIS_ADMIN_PASSWORD` | Auto-generated (64 chars) | Dashboard login password |
-| `AEGIS_ACTION_EXECUTABLES` | Empty (disabled) | Colon-separated list of allowed executable paths |
-| `TZ` | `UTC` | Timezone for logs and schedules |
+DHCP is disabled by default. Configure it in **Settings** only when AegisDNS is intended to provide address assignment on that network. Saving DHCP settings does not restart DNS automatically; restart the service when ready to apply them.
 
----
+### Relationship graph and privacy budgets
 
-## Dashboard & API
+The graph displays recorded DNS relationships and observation counts over a selected history window. ASN and country enrichment requires a local metadata file; no external enrichment service is needed. Its format is:
 
-The dashboard is at `http://localhost:5380`. Username is `admin`.
+```text
+# CIDR,ASN,country,organization
+203.0.113.0/24,AS64500,US,Example Network
+2001:db8::/32,AS64501,DE,Example IPv6 Network
+```
 
-Every API call requires HTTP Basic auth. State-changing calls also require the `X-Aegis-Request: 1` header (same-origin protection against CSRF):
+These are documentation-only example ranges. Supply actual metadata for your deployment. The daemon reads the file at startup. Certificate-related observations come from TLSA records, not active HTTPS certificate scanning.
+
+Privacy budget enforcement is off by default. When enabled, it limits recognized tracking activity after a device reaches its configured daily score. Scores reset at 00:00 UTC; explicit allow rules and bypass profiles take precedence over this content filtering.
+
+The score is a **DNS exposure estimate**, not a privacy guarantee. Company and application associations are inferred from domain patterns. Identifier-like hostnames are not confirmed advertising IDs, and activity between 00:00 and 06:00 UTC is not proof that a device was idle.
+
+## Data and security
+
+- **Local analysis:** policy evaluation, risk calculations, and query storage run on your host. DNS resolution still contacts authoritative servers or configured forwarders. Blocklist updates and enabled integrations, including Telegram and webhooks, make their own outbound requests.
+- **Protected administration:** the dashboard and management API require HTTP Basic authentication. The admin listener binds to loopback by default. Use an SSH tunnel or a TLS reverse proxy for remote administration.
+- **Request protection:** state-changing API requests require `X-Aegis-Request: 1`; cross-site administration is rejected.
+- **Separate action authentication:** custom endpoints require an authenticated POST. Bearer tokens are stored as hashes. Shell-type actions require an approved executable and a JSON argument array; they do not run arbitrary shell strings. Use TLS when carrying credentials across an untrusted network.
+- **Container boundaries:** the supplied deployment uses read-only root filesystems, writable data volumes, and restricted capabilities. The entrypoint performs ownership setup before dropping privileges for the daemon.
+- **Bounded retention:** query and relationship records are pruned after 30 days and also subject to row caps. Retained history can therefore be shorter on busy installations. The dashboard supports explicit history deletion and export.
+
+Only expose DNS to networks you intend to serve. Per-device policy depends on the source IP address visible to AegisDNS; NAT or a router acting as a DNS proxy may merge multiple clients under one address.
+
+### API example
+
+Use `curl --user admin` to enter the password interactively:
 
 ```bash
-# Read stats
-curl --user 'admin:YOUR_PASSWORD' http://localhost:5380/api/stats
+# Read network statistics.
+curl --user admin http://localhost:5380/api/stats
 
-# Block a domain
-curl --user 'admin:YOUR_PASSWORD' \
+# Add a global block rule.
+curl --user admin \
   -H 'X-Aegis-Request: 1' \
   -H 'Content-Type: application/json' \
   -d '{"domain":"example.com"}' \
   http://localhost:5380/api/deny
 ```
 
-If you expose the dashboard beyond localhost, put it behind a TLS reverse proxy (Caddy, nginx, Tailscale Serve). AegisDNS sets HSTS headers so browsers will enforce HTTPS once configured.
+The current route definitions live in [the web server](crates/daemon/src/web.rs); the dashboard's request client is in [ui/src/api.ts](ui/src/api.ts).
 
----
+## Development
 
-## Custom actions
-
-AegisDNS lets you trigger real-world actions when a DNS query matches a custom domain. This is genuinely unique; no other DNS server does this.
-
-Register `.aegis`, `.lan`, `.root`, or `.home.arpa` domains as action triggers. When queried, they can fire a webhook, run a sandboxed script, or serve a custom HTML page.
+The backend is a Rust workspace. A source build requires a Rust toolchain and the native build dependencies used in the [Dockerfile](Dockerfile), including Clang, pkg-config, and OpenSSL development headers. Running the complete service also requires Unbound, its trust-anchor tooling, local configuration, and the dashboard assets.
 
 ```bash
-curl -X POST http://deploy.aegis:5381 \
-  -H 'Authorization: Bearer YOUR_ACTION_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"version": "1.2.3"}'
-```
-
-Shell actions are disabled by default. Each executable must be explicitly allowlisted in `AEGIS_ACTION_EXECUTABLES`. Commands are JSON arrays and never pass through a shell. Action tokens are stored as SHA-256 hashes and verified with constant-time comparison.
-
----
-
-## Building from source
-
-```bash
-# Dependencies: Rust, Clang, OpenSSL dev headers, Unbound, unbound-anchor
 cargo build --release --locked
 cargo test --workspace --locked
 ```
 
-The release binary lands at `target/release/aegisdnsd`.
+The daemon binary is produced at `target/release/aegisdnsd`. For an integrated deployment, use Docker Compose rather than treating the binary alone as a complete installation.
 
-For production, use the Docker image. It includes Unbound, trust anchors, and runs in a hardened container:
-
-```bash
-docker compose build
-docker compose up -d
-```
-
----
-
-## Troubleshooting
-
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues including port 53 conflicts, Docker DNS during builds, per-device rule debugging, DNSSEC failures, and rate limiting behavior.
-
-Quick health check:
+For the dashboard, use Node.js 22 or later:
 
 ```bash
-aegis status
-dig @127.0.0.1 example.com
-dig @127.0.0.1 example.com +tcp
+cd ui
+npm ci
+npm run dev
 ```
 
----
+The development server runs at `http://127.0.0.1:5173` and proxies API requests to the daemon at `127.0.0.1:5380`. See [dashboard development](ui/README.md) for production builds and browser testing.
+
+| Path | Responsibility |
+| --- | --- |
+| `crates/daemon` | DNS proxy, administration API, integrations, privacy controls, and relationship recording. |
+| `crates/resolver` | Unbound lifecycle and resolver configuration. |
+| `crates/policy`, `crates/risk` | Rule evaluation and heuristic domain checks. |
+| `crates/blocklist` | Source fetching, parsing, compilation, and snapshots. |
+| `crates/analytics` | SQLite persistence, telemetry, and historical queries. |
+| `crates/config`, `crates/diagnostics` | Configuration, validation, and policy diagnostics. |
+| `crates/openroot` | Local-zone DNS service. |
+| `ui` | React/TypeScript dashboard and browser tests. |
+| `aegis` | Linux management CLI. |
+
+## Updates and backups
+
+Before updating, back up the application data volume and your repository-side configuration: `.env`, `config.json`, `openroot.json`, and any custom blocklists. Stop the service for a consistent filesystem-level backup of SQLite, or use a SQLite-aware backup process.
+
+For an installer-managed checkout, `aegis update` pulls source changes, rebuilds the images, and restarts the service. Review local modifications before updating. A service restart briefly interrupts DNS resolution. Do not use `docker compose down -v` when you intend to preserve application data.
 
 ## Contributing
 
-This project is MIT licensed. Fork it, improve it, break it, fix it, ship it.
+Bug reports, tests, documentation, and code contributions are welcome.
 
-If you find a security vulnerability, please open a private security advisory on GitHub instead of a public issue.
+1. Check [existing issues](https://github.com/Harshil-Anuwadia/aegisdns/issues) before opening a report.
+2. For bugs, include the revision, host environment, deployment method, reproduction steps, and expected versus actual behavior. Remove credentials and private DNS data from logs.
+3. Discuss substantial behavior changes before starting a large pull request.
+4. Keep changes focused, run the relevant backend or frontend checks, and document any changed configuration or behavior.
 
----
+AI-assisted contributions are welcome under the same review standard: understand the change, verify its behavior, and explain its limitations.
+
+For security vulnerabilities, use the repository's **Security** tab to check available private reporting options. Avoid disclosing exploit details or sensitive information in a public issue.
+
+## Support and funding
+
+Start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for setup and operational issues. Community support is provided through [GitHub issues](https://github.com/Harshil-Anuwadia/aegisdns/issues).
+
+AegisDNS is maintained by Harshil Anuwadia. [GitHub sponsorship](https://github.com/sponsors/Harshil-Anuwadia) is optional and supports development and maintenance. Organizations can also [fund public improvements or discuss deployment assistance](SPONSORSHIP.md).
+
+Everyone receives the same software. Sponsorship does not unlock features, provide access to users' DNS history, or influence filtering decisions. See the [sponsor directory](SPONSORS.md) for public acknowledgments.
 
 ## License
 
-[MIT](LICENSE): do whatever you want with it.
-
-Privacy shouldn't cost money. This code is free, and it always will be.
+AegisDNS is distributed under the [MIT license](LICENSE).

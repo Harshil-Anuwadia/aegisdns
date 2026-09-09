@@ -1,0 +1,61 @@
+.funding-footer-link {
+  color: var(--text-secondary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.funding-intro > p:first-child {
+  line-height: 1.8;
+  margin-bottom: 22px;
+  max-width: 660px;
+}
+.funding-opportunities {
+  padding: 0 24px 12px;
+}
+.funding-opportunities article {
+  padding: 20px 0;
+  border-top: 1px solid var(--border);
+}
+.funding-opportunities article:first-child {
+  border-top: 0;
+}
+.funding-opportunities h3 {
+  margin-bottom: 8px;
+}
+.funding-opportunities p {
+  font-size: 0.92rem;
+  line-height: 1.8;
+}
+.funding-principles h2:not(:first-of-type) {
+  margin-top: 26px;
+}
+.funding-form {
+  max-width: 780px;
+}
+.funding-draft {
+  margin-top: 30px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+  max-width: 780px;
+}
+.funding-draft h3 {
+  margin-bottom: 18px;
+}
+.funding-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+}
+.funding-draft textarea {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+@media (max-width: 700px) {
+  .funding-opportunities {
+    padding-inline: 18px;
+  }
+  .funding-draft-actions .button {
+    width: 100%;
+    white-space: normal;
+  }
+}

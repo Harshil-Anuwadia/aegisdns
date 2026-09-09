@@ -11,6 +11,8 @@ mod dhcp;
 mod auth;
 mod tailscale;
 mod upstream;
+mod relationships;
+mod privacy;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(config::paths::get_data_dir())?;
     auth::initialize()?;
     let analytics=Arc::new(analytics::AnalyticsDb::new(config::paths::get_db_path())?);
+    let action_domains=actions::ActionDomains::load(&analytics)?;
     let policy_existed=config::paths::get_policy_path().exists();
     let mut pol=policy::PolicyEngine::load_or_default();
     if !policy_existed { // Migrate once; never overwrite scoped rules from the legacy global table.
@@ -30,10 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let blocklists=Arc::new(RwLock::new(blocklist::BlocklistManager::new()));
     let anomaly=Arc::new(anomaly::AnomalyDetector::new());
     let fast_flux=Arc::new(RwLock::new(risk::FastFluxDetector::new()));
-    let cache=moka::future::Cache::builder().max_capacity(1).build(); // compatibility handle, no packet caching
+    let cache=moka::future::Cache::builder().max_capacity(50_000).time_to_live(std::time::Duration::from_secs(300)).build();
     let devices=Arc::new(RwLock::new(device_registry::DeviceRegistry::load()));
     let telegram=Arc::new(RwLock::new(telegram::load_config()));
     let upstream=upstream::load_config().await;
+    let privacy=Arc::new(privacy::PrivacyGuard::load());
+    if let Ok(summaries)=analytics.privacy_summaries().await {privacy.seed(&summaries);}
+    let ip_metadata=relationships::IpMetadata::load();
     let host_ip=load_host_ip();
     let restart=Arc::new(tokio::sync::Notify::new());
     let mut services=tokio::task::JoinSet::new();
@@ -81,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     });
     for addr in std::env::var("AEGIS_DNS_LISTEN").unwrap_or_else(|_|"0.0.0.0:53,[::]:53".into()).split(',') {
         let _:std::net::SocketAddr=addr.parse()?;
-        let proxy=DnsProxy::new(addr,resolver::proxy_upstream_addr(),&host_ip,analytics.clone(),policy.clone(),blocklists.clone(),fast_flux.clone(),anomaly.clone(),cache.clone(),telegram.clone(),devices.clone(),upstream.clone());
+        let proxy=DnsProxy::new(addr,resolver::proxy_upstream_addr(),&host_ip,analytics.clone(),action_domains.clone(),policy.clone(),blocklists.clone(),fast_flux.clone(),anomaly.clone(),cache.clone(),telegram.clone(),devices.clone(),upstream.clone(),privacy.clone(),ip_metadata.clone());
         services.spawn(async move {loop {
             if let Err(e)=proxy.clone().run().await {tracing::error!("DNS listener failed: {}",e);}
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -96,8 +102,9 @@ async fn main() -> anyhow::Result<()> {
     let web_db=analytics.clone();
     let dhcp_devices=devices.clone();
     let web_restart=restart.clone();
+    let web_privacy=privacy.clone();
     services.spawn(async move {loop {
-        if let Err(e)=web::start_web_server(web_db.clone(),policy.clone(),blocklists.clone(),anomaly.clone(),cache.clone(),devices.clone(),telegram.clone(),upstream.clone(),web_restart.clone()).await {tracing::error!("Dashboard failed: {}",e);}
+        if let Err(e)=web::start_web_server(web_db.clone(),action_domains.clone(),policy.clone(),blocklists.clone(),anomaly.clone(),cache.clone(),devices.clone(),telegram.clone(),upstream.clone(),web_privacy.clone(),web_restart.clone()).await {tracing::error!("Dashboard failed: {}",e);}
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }});
     let prune=analytics.clone();

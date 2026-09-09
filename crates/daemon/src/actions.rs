@@ -1,6 +1,6 @@
 use analytics::{AnalyticsDb, CustomAction};
 use moka::sync::Cache;
-use std::sync::{Arc, OnceLock};
+use std::{collections::HashSet, sync::{Arc, OnceLock, RwLock}};
 use std::time::Duration;
 use sha2::{Sha256, Digest};
 
@@ -14,6 +14,24 @@ fn cache() -> &'static Cache<String, Option<CustomAction>> {
             .time_to_live(Duration::from_secs(30))
             .build()
     })
+}
+
+#[derive(Clone, Default)]
+pub struct ActionDomains(Arc<RwLock<HashSet<String>>>);
+
+impl ActionDomains {
+    pub fn load(db:&AnalyticsDb)->anyhow::Result<Self> {
+        Ok(Self(Arc::new(RwLock::new(db.list_actions()?.into_iter().map(|action|action.domain).collect()))))
+    }
+    pub fn contains(&self,domain:&str)->bool {
+        self.0.read().unwrap_or_else(|poisoned|poisoned.into_inner()).contains(domain)
+    }
+    pub fn insert(&self,domain:String) {
+        self.0.write().unwrap_or_else(|poisoned|poisoned.into_inner()).insert(domain);
+    }
+    pub fn remove(&self,domain:&str) {
+        self.0.write().unwrap_or_else(|poisoned|poisoned.into_inner()).remove(domain);
+    }
 }
 
 
@@ -97,9 +115,29 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
                     *arg = params.get(key).ok_or_else(||anyhow::anyhow!("Missing action parameter"))?.clone();
                 }
             }
-            let mut child = tokio::process::Command::new(&args[0]).args(&args[1..])
-                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                .kill_on_drop(true).spawn()?;
+            let mut cmd = tokio::process::Command::new(&args[0]);
+            cmd.args(&args[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                // Sandbox: clear inherited environment so secrets like tokens,
+                // database paths, and internal config cannot leak to the child.
+                .env_clear()
+                // Provide only the minimal, safe environment variables the child needs.
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("HOME", "/tmp")
+                .env("LANG", "C.UTF-8")
+                // Confine the working directory to a non-sensitive location.
+                .current_dir("/tmp");
+            // On Unix, drop the child into its own process group so it cannot
+            // signal the parent DNS server, and set a conservative umask.
+            #[cfg(unix)]
+            {
+                // SAFETY: setpgid and umask are async-signal-safe.
+                unsafe { cmd.pre_exec(|| { libc::setpgid(0, 0); libc::umask(0o077); Ok(()) }); }
+            }
+            let mut child = cmd.spawn()?;
             let status = tokio::time::timeout(Duration::from_secs(15),child.wait()).await??;
             anyhow::ensure!(status.success(),"Action exited unsuccessfully");
         }

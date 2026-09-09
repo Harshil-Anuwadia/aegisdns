@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::ops::Add;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use dhcp4r::{options, packet, server};
@@ -67,6 +67,7 @@ pub struct AegisDhcpServer {
     last_lease: u32,
     device_registry: Arc<RwLock<DeviceRegistry>>,
     rt: tokio::runtime::Handle,
+    lease_persister: LeasePersister,
 }
 
 impl AegisDhcpServer {
@@ -77,6 +78,7 @@ impl AegisDhcpServer {
             last_lease: 0,
             device_registry,
             rt,
+            lease_persister: LeasePersister::new(),
         }
     }
 
@@ -155,7 +157,7 @@ impl server::Handler for AegisDhcpServer {
                 
                 self.leases.insert(req_ip, (in_packet.chaddr, Instant::now().add(Duration::from_secs(self.config.lease_duration_secs as u64))));
                 
-                if let Err(e)=save_leases(&self.leases) {error!("DHCP lease persistence failed: {}",e); return;}
+                self.lease_persister.schedule(&self.leases);
                 // Extract Hostname and auto-register in AegisDNS!
                 let hostname_opt = match in_packet.option(options::HOST_NAME) {
                     Some(options::DhcpOption::HostName(name)) => Some(name.clone()),
@@ -179,7 +181,7 @@ impl server::Handler for AegisDhcpServer {
                 }
                 if let Some(ip) = self.current_lease(&in_packet.chaddr) {
                     self.leases.remove(&ip);
-                    if let Err(e)=save_leases(&self.leases) {error!("DHCP lease persistence failed: {}",e);}
+                    self.lease_persister.schedule(&self.leases);
                 }
             }
             _ => {}
@@ -241,7 +243,7 @@ pub fn validate_config(c:&DhcpConfig)->Result<(),String> {
         || c.lease_duration_secs<60 || c.lease_duration_secs>30*86400 {return Err("Invalid DHCP pool, mask, reserved address, or lease duration".into());}
     Ok(())
 }
-#[derive(Serialize,Deserialize)]
+#[derive(Clone,Serialize,Deserialize)]
 struct SavedLease {ip:Ipv4Addr,mac:[u8;6],expires:u64}
 fn lease_path()->PathBuf {config::paths::get_data_dir().join("dhcp-leases.json")}
 fn load_leases()->HashMap<Ipv4Addr,([u8;6],Instant)> {
@@ -249,10 +251,47 @@ fn load_leases()->HashMap<Ipv4Addr,([u8;6],Instant)> {
     std::fs::read(lease_path()).ok().and_then(|b|serde_json::from_slice::<Vec<SavedLease>>(&b).ok()).unwrap_or_default().into_iter()
         .filter(|l|l.expires>now && l.expires-now<=30*86400).map(|l|(l.ip,(l.mac,Instant::now()+Duration::from_secs(l.expires-now)))).collect()
 }
-fn save_leases(leases:&HashMap<Ipv4Addr,([u8;6],Instant)>)->anyhow::Result<()> {
-    let now=Instant::now(); let unix=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let leases:Vec<_>=leases.iter().filter(|(_,(_,end))|*end>now).map(|(ip,(mac,end))|SavedLease{ip:*ip,mac:*mac,expires:unix+end.duration_since(now).as_secs()}).collect();
-    config::atomic_write(lease_path(),serde_json::to_vec(&leases)?)?; Ok(())
+fn lease_snapshot(leases:&HashMap<Ipv4Addr,([u8;6],Instant)>)->Vec<SavedLease> {
+    let now=Instant::now(); let unix=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    leases.iter().filter(|(_,(_,end))|*end>now).map(|(ip,(mac,end))|SavedLease{ip:*ip,mac:*mac,expires:unix+end.duration_since(now).as_secs()}).collect()
+}
+
+#[derive(Clone)]
+struct LeasePersister {
+    pending: Arc<(Mutex<Option<Vec<SavedLease>>>, Condvar)>,
+}
+
+impl LeasePersister {
+    fn new() -> Self {
+        let pending = Arc::new((Mutex::new(None::<Vec<SavedLease>>), Condvar::new()));
+        let worker = pending.clone();
+        std::thread::Builder::new().name("aegisdns-dhcp-persist".into()).spawn(move || loop {
+            let leases = {
+                let (lock, ready) = &*worker;
+                let mut value = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                while value.is_none() {
+                    value = ready.wait(value).unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                value.take().unwrap_or_default()
+            };
+            let result = (|| -> anyhow::Result<()> {
+                config::atomic_write(lease_path(), serde_json::to_vec(&leases)?)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {}
+                Err(err) => error!("DHCP lease persistence failed: {}", err),
+            }
+        }).expect("failed to start DHCP lease persistence worker");
+        Self { pending }
+    }
+
+    fn schedule(&self, leases: &HashMap<Ipv4Addr, ([u8; 6], Instant)>) {
+        let snapshot = lease_snapshot(leases);
+        let (lock, ready) = &*self.pending;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
+        ready.notify_one();
+    }
 }
 #[cfg(test)] mod tests {
     use super::*;

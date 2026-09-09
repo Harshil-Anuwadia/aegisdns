@@ -22,6 +22,7 @@ use std::time::Instant;
 #[allow(dead_code)]
 pub struct AppState {
     pub analytics: Arc<AnalyticsDb>,
+    pub action_domains: crate::actions::ActionDomains,
     pub policy: Arc<RwLock<PolicyEngine>>,
     pub blocklist: Arc<RwLock<BlocklistManager>>,
     pub anomaly: Arc<crate::anomaly::AnomalyDetector>,
@@ -29,11 +30,13 @@ pub struct AppState {
     pub device_registry: Arc<RwLock<crate::device_registry::DeviceRegistry>>,
     pub telegram_cfg: Arc<RwLock<crate::telegram::TelegramConfig>>,
     pub upstream_cfg: crate::upstream::SharedUpstreamDns,
+    pub privacy: Arc<crate::privacy::PrivacyGuard>,
     pub restart: Arc<tokio::sync::Notify>,
 }
 
 pub async fn start_web_server(
     analytics: Arc<AnalyticsDb>,
+    action_domains: crate::actions::ActionDomains,
     policy: Arc<RwLock<PolicyEngine>>,
     blocklist: Arc<RwLock<BlocklistManager>>,
     anomaly: Arc<crate::anomaly::AnomalyDetector>,
@@ -41,10 +44,12 @@ pub async fn start_web_server(
     device_registry: Arc<RwLock<crate::device_registry::DeviceRegistry>>,
     telegram_cfg: Arc<RwLock<crate::telegram::TelegramConfig>>,
     upstream_cfg: crate::upstream::SharedUpstreamDns,
+    privacy: Arc<crate::privacy::PrivacyGuard>,
     restart: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
     let state = AppState {
         analytics,
+        action_domains,
         policy,
         blocklist,
         anomaly,
@@ -52,6 +57,7 @@ pub async fn start_web_server(
         device_registry,
         telegram_cfg,
         upstream_cfg,
+        privacy,
         restart,
     };
 
@@ -98,6 +104,8 @@ pub async fn start_web_server(
         .route("/api/actions/:domain", delete(delete_action))
         .route("/api/actions/logs", get(get_action_logs).delete(clear_action_logs))
         .route("/api/upstream", get(get_upstream).post(post_upstream))
+        .route("/api/graph", get(get_relationship_graph))
+        .route("/api/privacy", get(get_privacy).post(post_privacy))
         .route("/blocked", get(get_blocked_page))
         .route("/logo.png", get(get_logo))
         .fallback_service(ServeDir::new("/usr/share/aegisdns/ui"))
@@ -116,6 +124,29 @@ pub async fn start_web_server(
 
 #[derive(Serialize)]
 struct MyIp { ip: String }
+
+#[derive(Deserialize)]
+struct GraphQuery { domain:Option<String>, hours:Option<u32> }
+
+async fn get_relationship_graph(State(state):State<AppState>,Query(query):Query<GraphQuery>)->Json<analytics::RelationshipGraph>{
+    Json(state.analytics.relationship_graph(query.domain.as_deref(),query.hours.unwrap_or(24)).await.unwrap_or(analytics::RelationshipGraph{nodes:Vec::new(),edges:Vec::new(),hours:query.hours.unwrap_or(24).clamp(1,720)}))
+}
+
+#[derive(Serialize)]
+struct PrivacyResponse { config:crate::privacy::PrivacyConfig, devices:Vec<analytics::PrivacySummary> }
+
+async fn get_privacy(State(state):State<AppState>)->Json<PrivacyResponse>{
+    let config=state.privacy.config().await;
+    let devices=state.analytics.privacy_summaries().await.unwrap_or_default();
+    Json(PrivacyResponse{config,devices})
+}
+
+async fn post_privacy(State(state):State<AppState>,Json(config):Json<crate::privacy::PrivacyConfig>)->Json<ActionResponse>{
+    match state.privacy.save(config).await{
+        Ok(())=>Json(ActionResponse{success:true,message:"Privacy budget settings saved".into()}),
+        Err(error)=>Json(ActionResponse{success:false,message:error.to_string()}),
+    }
+}
 
 async fn get_my_ip(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Json<MyIp> {
     let ip = normalize_ip(&addr.ip().to_string());
@@ -631,7 +662,7 @@ async fn get_logo() -> (axum::http::StatusCode, axum::http::HeaderMap, &'static 
     headers.insert(axum::http::header::CONTENT_TYPE, "image/png".parse().unwrap());
     headers.insert(axum::http::header::CACHE_CONTROL, "public, max-age=31536000".parse().unwrap());
 
-    let logo_bytes = include_bytes!("../../../assets/logo.png");
+    let logo_bytes = include_bytes!("../../../assets/AegisDNS.png");
     (axum::http::StatusCode::OK, headers, logo_bytes)
 }
 
@@ -791,7 +822,11 @@ struct CreateActionRequest {
 }
 
 async fn get_actions(State(state): State<AppState>) -> Json<Vec<analytics::CustomAction>> {
-    Json(state.analytics.list_actions().unwrap_or_default())
+    let mut actions = state.analytics.list_actions().unwrap_or_default();
+    for action in &mut actions {
+        action.token = None;
+    }
+    Json(actions)
 }
 
 async fn post_action(
@@ -805,6 +840,7 @@ async fn post_action(
     if let Err(e) = crate::actions::validate(&req.action_type, req.shell_command.as_deref(), req.payload_url.as_deref(), req.method.as_deref(), req.token.as_deref()) {
         return Json(ActionResponse { success:false, message:e.to_string() });
     }
+    let token_hash = req.token.as_deref().map(crate::actions::hash_token);
     match state.analytics.upsert_action(
         &domain,
         &req.action_type,
@@ -813,10 +849,11 @@ async fn post_action(
         req.shell_command.as_deref(),
         req.html_content.as_deref(),
         req.success_msg.as_deref(),
-        req.token.as_deref(),
+        token_hash.as_deref(),
     ) {
         Ok(_) => {
             crate::actions::invalidate(&domain);
+            state.action_domains.insert(domain.clone());
             Json(ActionResponse { success: true, message: format!("Action for '{}' saved.", domain) })
         }
         Err(e) => Json(ActionResponse { success: false, message: e.to_string() }),
@@ -827,10 +864,11 @@ async fn delete_action(
     State(state): State<AppState>,
     Path(domain): Path<String>,
 ) -> Json<ActionResponse> {
-    let domain = domain.trim().to_lowercase();
+    let domain = config::canonical_domain(&domain);
     match state.analytics.delete_action(&domain) {
         Ok(_) => {
             crate::actions::invalidate(&domain);
+            state.action_domains.remove(&domain);
             Json(ActionResponse { success: true, message: format!("Action for '{}' deleted.", domain) })
         }
         Err(e) => Json(ActionResponse { success: false, message: e.to_string() }),
@@ -877,7 +915,7 @@ pub async fn set_classification(axum::extract::State(state): axum::extract::Stat
 
 async fn get_recent(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Query(params): axum::extract::Query<StatsQuery>) -> axum::Json<Vec<analytics::RecentQuery>> {
     let ip = params.device_id.filter(|s| !s.trim().is_empty());
-    axum::Json(state.analytics.get_recent_queries(50, ip.as_deref()).unwrap_or_default())
+    axum::Json(state.analytics.get_recent_queries(50, ip.as_deref()).await.unwrap_or_default())
 }
 
 pub async fn live_feed_stream(axum::extract::State(state): axum::extract::State<AppState>) -> axum::response::sse::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
@@ -1061,7 +1099,7 @@ async fn get_export_logs(State(state): State<AppState>, Query(q): Query<ExportQu
     let ip     = q.ip.as_deref().filter(|s| !s.is_empty() && *s != "all");
     let fmt    = q.format.as_deref().unwrap_or("csv");
 
-    let rows = match state.analytics.get_queries_for_export(status, ip, days) {
+    let rows = match state.analytics.get_queries_for_export(status, ip, days).await {
         Ok(r)  => r,
         Err(e) => {
             return axum::response::Response::builder()
@@ -1171,6 +1209,39 @@ fn csv_cell(value:&str)->String {
 }
 #[cfg(test)] mod security_tests {
     use super::*;
+    #[tokio::test]
+    async fn saved_action_authenticates_without_disclosing_its_token() {
+        let path = std::env::temp_dir().join(format!("aegis-action-{}-{}.db", std::process::id(), rand::random::<u64>()));
+        let analytics = Arc::new(AnalyticsDb::new(path).unwrap());
+        let state = AppState {
+            action_domains: crate::actions::ActionDomains::load(&analytics).unwrap(),
+            analytics: analytics.clone(),
+            policy: Arc::new(RwLock::new(PolicyEngine::new(policy::Profile::Balanced))),
+            blocklist: Arc::new(RwLock::new(BlocklistManager { lists: vec![], compiled_domains: Default::default(), compiled_exceptions: Default::default() })),
+            anomaly: Arc::new(crate::anomaly::AnomalyDetector::new()),
+            cache: Cache::new(1),
+            device_registry: Arc::new(RwLock::new(Default::default())),
+            telegram_cfg: Arc::new(RwLock::new(Default::default())),
+            upstream_cfg: Arc::new(RwLock::new(Default::default())),
+            privacy: Arc::new(crate::privacy::PrivacyGuard::load()),
+            restart: Arc::new(tokio::sync::Notify::new()),
+        };
+        let token = "dashboard-test-bearer-token-123456789";
+        let Json(result) = post_action(State(state.clone()), Json(CreateActionRequest {
+            domain: "TEST.LAN.".into(), action_type: "html".into(), payload_url: None,
+            method: None, shell_command: None, html_content: Some("<p>Test</p>".into()),
+            success_msg: None, token: Some(token.into()),
+        })).await;
+        assert!(result.success, "{}", result.message);
+        let action = analytics.list_actions().unwrap().remove(0);
+        assert_ne!(action.token.as_deref(), Some(token));
+        assert!(crate::actions::verify_token(token, action.token.as_deref().unwrap()));
+        assert!(crate::actions::execute(&action, &HashMap::new(), token).await.is_ok());
+        assert!(crate::actions::execute(&action, &HashMap::new(), "invalid-token").await.is_err());
+        assert!(get_actions(State(state.clone())).await.0[0].token.is_none());
+        assert!(delete_action(State(state), Path("TEST.LAN.".into())).await.0.success);
+        assert!(analytics.list_actions().unwrap().is_empty());
+    }
     #[tokio::test] async fn block_page_escapes_all_parameters() {
         let marker="<script>alert(1)</script>";
         let params=HashMap::from([("domain".into(),marker.into()),("reason".into(),marker.into()),("source".into(),marker.into())]);

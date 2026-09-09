@@ -16,6 +16,8 @@ dependencies = [
  "diagnostics",
  "futures-util",
  "hickory-proto",
+ "ipnet",
+ "libc",
  "moka",
  "once_cell",
  "policy",

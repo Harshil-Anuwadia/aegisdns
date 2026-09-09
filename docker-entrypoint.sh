@@ -4,7 +4,7 @@ set -eu
 # Do not traverse mounted blocklist folders or change the host's zone/config files.
 mkdir -p /var/lib/aegisdns /run/aegisdns
 chown aegis:aegis /var/lib/aegisdns /run/aegisdns
-for name in analytics.db analytics.db-wal analytics.db-shm admin-password policy.json devices.json telegram.json dhcp.json dhcp-leases.json upstream.json blocklist-snapshot.json root.key; do
+for name in analytics.db analytics.db-wal analytics.db-shm admin-password policy.json devices.json telegram.json dhcp.json dhcp-leases.json upstream.json privacy.json blocklist-snapshot.json root.key; do
     if [ -f "/var/lib/aegisdns/$name" ] && [ ! -L "/var/lib/aegisdns/$name" ]; then
         chown aegis:aegis "/var/lib/aegisdns/$name"
         chmod 600 "/var/lib/aegisdns/$name"

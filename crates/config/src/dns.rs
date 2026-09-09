@@ -1,5 +1,5 @@
 //! Shared DNS wire handling. Never construct replies by copying untrusted header counts.
-use hickory_proto::{op::{Edns, Message, MessageType, OpCode, ResponseCode}, rr::{DNSClass, RData, Record, rdata::{A, SOA}, Name}};
+use hickory_proto::{op::{Edns, Message, MessageType, OpCode, ResponseCode}, rr::{DNSClass, RData, Record, rdata::{A, CNAME, SOA}, Name}};
 
 pub fn parse_query(bytes: &[u8]) -> Option<Message> {
     let q = Message::from_vec(bytes).ok()?;
@@ -33,6 +33,13 @@ pub fn ipv4_reply(q: &Message, ip: std::net::Ipv4Addr) -> Message {
     let mut m = reply(q, ResponseCode::NoError);
     m.add_answer(Record::from_rdata(q.queries[0].name.clone(), 30, RData::A(A(ip))));
     m
+}
+
+pub fn cname_reply(q: &Message, target: &str) -> Option<Message> {
+    let target = Name::from_ascii(target).ok()?;
+    let mut m = reply(q, ResponseCode::NoError);
+    m.add_answer(Record::from_rdata(q.queries[0].name.clone(), 60, RData::CNAME(CNAME(target))));
+    Some(m)
 }
 
 pub fn valid_response(q: &Message, r: &Message) -> bool {
@@ -76,5 +83,11 @@ pub fn local_zone(domain: &str) -> bool {
         for n in 0..100 { r.add_answer(Record::from_rdata(q.queries[0].name.clone(), 60, RData::A(A(std::net::Ipv4Addr::new(8,8,8,n))))); }
         assert!(Message::from_vec(&encode_for_client(&r,&q,false).unwrap()).unwrap().metadata.truncation);
         assert!(!Message::from_vec(&encode_for_client(&r,&q,true).unwrap()).unwrap().metadata.truncation);
+    }
+    #[test] fn cname_answers_support_all_redirected_query_types() {
+        let mut q = Message::query(); q.add_query(Query::query(Name::from_ascii("www.google.com").unwrap(), RecordType::AAAA));
+        let r=cname_reply(&q,"forcesafesearch.google.com.").unwrap();
+        assert_eq!(r.answers.len(),1);
+        assert!(matches!(&r.answers[0].data,RData::CNAME(name) if name.0.to_ascii()=="forcesafesearch.google.com."));
     }
 }

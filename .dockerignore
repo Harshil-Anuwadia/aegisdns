@@ -4,6 +4,10 @@
 .env.*
 .dns-backup
 target
+**/node_modules
+ui/dist
+ui/test-results
+ui/playwright-report
 *.db
 *.db-*
 *.log

@@ -12,7 +12,7 @@ pub struct ListMetadata {
 }
 
 #[derive(Serialize,Deserialize,Default)]
-struct Snapshot { lists: Vec<ListMetadata>, domains: HashSet<String>, #[serde(default)] exceptions: HashSet<String>, sources: HashMap<String,RuleSet> }
+struct Snapshot { lists: Vec<ListMetadata>, domains: HashSet<String>, #[serde(default)] exceptions: HashSet<String>, #[serde(default)] sources: HashMap<String,RuleSet> }
 #[derive(Serialize,Deserialize,Clone)]
 struct RuleSet { blocked:HashSet<String>, allowed:HashSet<String> }
 

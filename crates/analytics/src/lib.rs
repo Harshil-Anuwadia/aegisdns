@@ -29,6 +29,16 @@ struct InsertQuery {
     status: String,
     latency_ms: u32,
     client_ip: String,
+    relationships: Vec<RelationshipObservation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationshipObservation {
+    pub source: Option<String>,
+    pub source_kind: Option<String>,
+    pub relation: String,
+    pub target: String,
+    pub target_kind: String,
 }
 
 enum DbWrite { Query(InsertQuery), Flush(tokio::sync::oneshot::Sender<anyhow::Result<()>>) }
@@ -41,7 +51,18 @@ async fn persist_batch(conn:Arc<Mutex<Connection>>,batch:&mut Vec<InsertQuery>)-
         let tx=connection.transaction()?;
         {
             let mut stmt=tx.prepare_cached("INSERT INTO queries (domain,status,latency_ms,client_ip) VALUES (?1,?2,?3,?4)")?;
-            for q in records {stmt.execute(rusqlite::params![q.domain,q.status,q.latency_ms,q.client_ip])?;}
+            let mut relationship_stmt=tx.prepare_cached(
+                "INSERT INTO dns_relationships (query_domain, source, source_kind, relation, target, target_kind, client_ip)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            )?;
+            for q in records {
+                stmt.execute(rusqlite::params![&q.domain,&q.status,q.latency_ms,&q.client_ip])?;
+                for edge in q.relationships {
+                    let source=edge.source.as_deref().unwrap_or(&q.domain);
+                    let source_kind=edge.source_kind.as_deref().unwrap_or("domain");
+                    relationship_stmt.execute(rusqlite::params![&q.domain,source,source_kind,edge.relation,edge.target,edge.target_kind,&q.client_ip])?;
+                }
+            }
         }
         tx.commit()?; Ok(())
     }).await??;
@@ -130,6 +151,25 @@ impl AnalyticsDb {
         conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON queries(timestamp)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_client_ip_timestamp ON queries(client_ip, timestamp)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_status_timestamp ON queries(status, timestamp)", [])?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS dns_relationships (
+                id INTEGER PRIMARY KEY,
+                observed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                query_domain TEXT NOT NULL,
+                source TEXT,
+                source_kind TEXT,
+                relation TEXT NOT NULL,
+                target TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                client_ip TEXT NOT NULL
+            )", [],
+        )?;
+        let _ = conn.execute("ALTER TABLE dns_relationships ADD COLUMN source TEXT", []);
+        let _ = conn.execute("ALTER TABLE dns_relationships ADD COLUMN source_kind TEXT", []);
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_domain_time ON dns_relationships(query_domain, observed_at)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_source_time ON dns_relationships(source, observed_at)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_client_time ON dns_relationships(client_ip, observed_at)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_target_time ON dns_relationships(target, observed_at)", [])?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS policy_rules (
@@ -229,11 +269,15 @@ impl AnalyticsDb {
     }
 
     pub async fn record_failure(&self, domain: &str, client_ip: &str) -> anyhow::Result<()> {
-        self.enqueue(InsertQuery { domain:domain.into(), status:"failed".into(), latency_ms:0, client_ip:client_ip.into() })?;
+        self.enqueue(InsertQuery { domain:domain.into(), status:"failed".into(), latency_ms:0, client_ip:client_ip.into(), relationships:Vec::new() })?;
         Ok(())
     }
 
     pub async fn record_query(&self, domain: &str, blocked: bool, latency_ms: u32, client_ip: &str) -> anyhow::Result<()> {
+        self.record_query_with_relationships(domain, blocked, latency_ms, client_ip, Vec::new()).await
+    }
+
+    pub async fn record_query_with_relationships(&self, domain: &str, blocked: bool, latency_ms: u32, client_ip: &str, relationships: Vec<RelationshipObservation>) -> anyhow::Result<()> {
 
         let status = if blocked { "blocked" } else { "allowed" };
         let domain = domain.to_string();
@@ -254,6 +298,7 @@ impl AnalyticsDb {
             status: status.to_string(),
             latency_ms,
             client_ip,
+            relationships,
         }).map_err(|e| anyhow::anyhow!("Analytics queue full/closed: {}", e))?;
 
         Ok(())
@@ -277,6 +322,7 @@ impl AnalyticsDb {
             status: "cache_hit".to_string(),
             latency_ms: 0,
             client_ip,
+            relationships: Vec::new(),
         }).map_err(|e| anyhow::anyhow!("Analytics queue full/closed: {}", e))?;
 
         Ok(())
@@ -289,29 +335,112 @@ impl AnalyticsDb {
         // Row-count cap: keep at most 1,000,000 rows so disk usage stays bounded on
         // small hosts (Raspberry Pi, etc.) even on high-traffic networks.
         conn.execute(
-            "DELETE FROM queries WHERE id NOT IN (SELECT id FROM queries ORDER BY timestamp DESC LIMIT 1000000)",
+            "DELETE FROM queries WHERE id < (SELECT id FROM queries ORDER BY id DESC LIMIT 1 OFFSET 999999)",
+            [],
+        )?;
+        conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-30 days')", [])?;
+        conn.execute(
+            "DELETE FROM dns_relationships WHERE id < (SELECT id FROM dns_relationships ORDER BY id DESC LIMIT 1 OFFSET 1999999)",
             [],
         )?;
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
 
+    pub async fn relationship_graph(&self, domain: Option<&str>, hours: u32) -> anyhow::Result<RelationshipGraph> {
+        let db_path = self.db_path.clone();
+        let domain = domain.map(|value|value.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|value| !value.is_empty());
+        let hours = hours.clamp(1, 24 * 30);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<RelationshipGraph> {
+            let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let window = format!("-{hours} hours");
+            let sql = if domain.is_some() {
+                "SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
+                 FROM dns_relationships WHERE observed_at >= datetime('now', ?1) AND query_domain IN (
+                    SELECT DISTINCT query_domain FROM dns_relationships
+                    WHERE observed_at >= datetime('now', ?1) AND (query_domain = ?2 OR source = ?2 OR target = ?2)
+                 )
+                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind ORDER BY MAX(observed_at) DESC LIMIT 500"
+            } else {
+                "SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
+                 FROM dns_relationships WHERE observed_at >= datetime('now', ?1)
+                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind ORDER BY MAX(observed_at) DESC LIMIT 500"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RelationshipEdge> {
+                let source: String = row.get(0)?;
+                let source_kind: String = row.get(1)?;
+                let target: String = row.get(3)?;
+                let target_kind: String = row.get(4)?;
+                Ok(RelationshipEdge { source:format!("{source_kind}:{source}"), target:format!("{target_kind}:{target}"), relation:row.get(2)?, count:row.get(5)?, first_seen:row.get(6)?, last_seen:row.get(7)? })
+            };
+            let mut edges=Vec::new();
+            if let Some(ref selected)=domain {
+                for row in stmt.query_map(rusqlite::params![window,selected],map_row)? { edges.push(row?); }
+            } else {
+                for row in stmt.query_map(rusqlite::params![window],map_row)? { edges.push(row?); }
+            }
+            let mut nodes=std::collections::BTreeMap::new();
+            for edge in &edges {
+                for id in [&edge.source,&edge.target] {
+                    let (kind,label)=id.split_once(':').unwrap_or(("domain",id));
+                    nodes.entry(id.clone()).or_insert_with(||RelationshipNode{id:id.clone(),label:label.into(),kind:kind.into()});
+                }
+            }
+            Ok(RelationshipGraph{nodes:nodes.into_values().collect(),edges,hours})
+        }).await?
+    }
 
-    pub fn get_queries_for_export(&self, status_filter: Option<&str>, ip_filter: Option<&str>, days: u32) -> anyhow::Result<Vec<RecentQuery>> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn privacy_summaries(&self) -> anyhow::Result<Vec<PrivacySummary>> {
+        let db_path=self.db_path.clone();
+        tokio::task::spawn_blocking(move ||->anyhow::Result<Vec<PrivacySummary>> {
+            let conn=Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut stmt=conn.prepare("SELECT client_ip,COUNT(*),COUNT(DISTINCT domain),SUM(status='blocked'),SUM(CAST(strftime('%H',timestamp) AS INTEGER)<6) FROM queries WHERE timestamp>=datetime('now','start of day') AND client_ip!='' GROUP BY client_ip ORDER BY COUNT(*) DESC")?;
+            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?,r.get::<_,u64>(3)?,r.get::<_,u64>(4)?)))?;
+            let mut output=Vec::new();
+            for row in rows {
+                let (device,total,unique,blocked,quiet)=row?;
+                let distinct=|kind:&str,relation:Option<&str>|->anyhow::Result<u64>{
+                    Ok(if let Some(relation)=relation {
+                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2 AND relation=?3",rusqlite::params![&device,kind,relation],|r|r.get(0))?
+                    } else {
+                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2",rusqlite::params![&device,kind],|r|r.get(0))?
+                    })
+                };
+                let tracking_companies=distinct("company",None)?;
+                let advertising_identifiers=distinct("domain",Some("contains_identifier"))?;
+                let applications=distinct("application",None)?;
+                let network_spread=distinct("network",None)?;
+                let country_spread=distinct("country",None)?;
+                let uniqueness=if total==0{0.0}else{unique as f64/total as f64};
+                let quiet_ratio=if total==0{0.0}else{quiet as f64/total as f64};
+                let score=((tracking_companies.min(4)*8+advertising_identifiers.min(20)+applications.min(5)*2+network_spread.min(7)*2+country_spread.min(5)*3) as f64+uniqueness*18.0+quiet_ratio*10.0).round().min(100.0) as u8;
+                output.push(PrivacySummary{device,total_queries:total,unique_domains:unique,blocked_queries:blocked,tracking_companies,advertising_identifiers,applications,network_spread,country_spread,quiet_hour_queries:quiet,score});
+            }
+            Ok(output)
+        }).await?
+    }
+
+
+    pub async fn get_queries_for_export(&self, status_filter: Option<&str>, ip_filter: Option<&str>, days: u32) -> anyhow::Result<Vec<RecentQuery>> {
+        let db_path = self.db_path.clone();
+        let status_filter = status_filter.map(str::to_owned);
+        let ip_filter = ip_filter.map(str::to_owned);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RecentQuery>> {
+        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mut res = Vec::new();
 
         let mut query = "SELECT domain, timestamp, status, client_ip FROM queries WHERE timestamp >= datetime('now', ?) ".to_string();
         let mut params: Vec<String> = vec![format!("-{} days", days)];
 
-        if let Some(ip) = ip_filter {
+        if let Some(ip) = ip_filter.as_deref() {
             if !ip.is_empty() && ip != "all" {
                 query.push_str(&format!("AND client_ip = ?{} ", params.len() + 1));
                 params.push(ip.to_string());
             }
         }
 
-        if let Some(status) = status_filter {
+        if let Some(status) = status_filter.as_deref() {
             if !status.is_empty() && status != "all" {
                 query.push_str(&format!("AND status = ?{} ", params.len() + 1));
                 params.push(status.to_string());
@@ -334,13 +463,17 @@ impl AnalyticsDb {
             });
         }
         Ok(res)
+        }).await?
     }
 
-    pub fn get_recent_queries(&self, limit: u32, ip_filter: Option<&str>) -> anyhow::Result<Vec<RecentQuery>> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn get_recent_queries(&self, limit: u32, ip_filter: Option<&str>) -> anyhow::Result<Vec<RecentQuery>> {
+        let db_path = self.db_path.clone();
+        let ip_filter = ip_filter.map(str::to_owned);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RecentQuery>> {
+        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mut res = Vec::new();
 
-        if let Some(ip) = ip_filter {
+        if let Some(ip) = ip_filter.as_deref() {
             let mut stmt = conn.prepare("SELECT domain, timestamp, status, client_ip FROM queries WHERE client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' ORDER BY timestamp DESC LIMIT ?2")?;
             let mut rows = stmt.query(rusqlite::params![ip, limit])?;
             while let Some(row) = rows.next()? {
@@ -364,6 +497,7 @@ impl AnalyticsDb {
             }
         }
         Ok(res)
+        }).await?
     }
 
     pub fn get_domain_insights(&self, domain: &str) -> anyhow::Result<DomainInsight> {
@@ -436,15 +570,19 @@ impl AnalyticsDb {
             match timeframe.as_str() {
                 "all" => {
                     conn.execute("DELETE FROM queries", [])?;
+                    conn.execute("DELETE FROM dns_relationships", [])?;
                 }
                 "1h" => {
                     conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-1 hour')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-1 hour')", [])?;
                 }
                 "24h" => {
                     conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-1 day')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-1 day')", [])?;
                 }
                 "7d" => {
                     conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-7 days')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-7 days')", [])?;
                 }
                 _ => {}
             }
@@ -854,6 +992,45 @@ pub struct DomainInsight {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelationshipNode {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelationshipEdge {
+    pub source: String,
+    pub target: String,
+    pub relation: String,
+    pub count: u64,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelationshipGraph {
+    pub nodes: Vec<RelationshipNode>,
+    pub edges: Vec<RelationshipEdge>,
+    pub hours: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrivacySummary {
+    pub device: String,
+    pub total_queries: u64,
+    pub unique_domains: u64,
+    pub blocked_queries: u64,
+    pub tracking_companies: u64,
+    pub advertising_identifiers: u64,
+    pub applications: u64,
+    pub network_spread: u64,
+    pub country_spread: u64,
+    pub quiet_hour_queries: u64,
+    pub score: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CustomAction {
     pub domain:        String,
     pub action_type:   String,
@@ -867,14 +1044,45 @@ pub struct CustomAction {
 
 #[cfg(test)] mod regression_tests {
     use super::*;
+    fn test_path(label:&str)->PathBuf{
+        std::env::temp_dir().join(format!("aegis-analytics-{label}-{}-{}.db",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+    }
+
     #[tokio::test] async fn repeated_queries_count_and_flush() {
-        let path=std::env::temp_dir().join(format!("aegis-analytics-{}-{}.db",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path=test_path("flush");
         let db=AnalyticsDb::new(path.clone()).unwrap();
         for _ in 0..5 {db.record_query("blocked.example",true,0,"192.168.1.2").await.unwrap();}
         db.record_failure("failed.example","192.168.1.2").await.unwrap();
         db.flush().await.unwrap();
         assert_eq!(db.get_stats().await.unwrap().blocked_today,5);
-        assert_eq!(db.get_recent_queries(20,None).unwrap().len(),6);
+        assert_eq!(db.get_recent_queries(20,None).await.unwrap().len(),6);
+        drop(db);let _=std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn relationships_and_privacy_are_aggregated_and_deleted_together(){
+        let path=test_path("relationships");
+        let db=AnalyticsDb::new(path.clone()).unwrap();
+        db.record_query_with_relationships("stats.doubleclick.net",false,3,"192.0.2.8",vec![
+            RelationshipObservation{source:None,source_kind:None,relation:"requested_by".into(),target:"192.0.2.8".into(),target_kind:"device".into()},
+            RelationshipObservation{source:None,source_kind:None,relation:"contacts".into(),target:"Google".into(),target_kind:"company".into()},
+            RelationshipObservation{source:Some("edge.example".into()),source_kind:Some("domain".into()),relation:"resolves_to".into(),target:"203.0.113.7".into(),target_kind:"ip".into()},
+            RelationshipObservation{source:None,source_kind:None,relation:"used_by".into(),target:"Example TV".into(),target_kind:"application".into()},
+        ]).await.unwrap();
+        db.flush().await.unwrap();
+
+        let graph=db.relationship_graph(Some("stats.doubleclick.net"),24).await.unwrap();
+        assert!(graph.nodes.iter().any(|node|node.id=="company:Google"));
+        assert!(graph.edges.iter().any(|edge|edge.source=="domain:edge.example"&&edge.relation=="resolves_to"&&edge.count==1));
+        let related=db.relationship_graph(Some("edge.example"),24).await.unwrap();
+        assert!(related.edges.iter().any(|edge|edge.relation=="requested_by"&&edge.target=="device:192.0.2.8"));
+        let summaries=db.privacy_summaries().await.unwrap();
+        assert_eq!(summaries.len(),1);
+        assert_eq!(summaries[0].tracking_companies,1);
+        assert_eq!(summaries[0].applications,1);
+
+        db.delete_logs("all").await.unwrap();
+        assert!(db.relationship_graph(None,24).await.unwrap().edges.is_empty());
         drop(db);let _=std::fs::remove_file(path);
     }
 }

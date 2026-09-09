@@ -11,6 +11,7 @@ pub enum BlockReason {
     Tracker,
     Advertisement,
     Telemetry,
+    PrivacyBudget,
     CategorySpecific(String),
 }
 
@@ -265,7 +266,7 @@ impl PolicyEngine {
         config::iter_subdomains(domain).any(|sub| sub == pattern_base)
     }
 
-    fn is_typosquatting(domain: &str) -> bool {
+    pub fn is_typosquatting(domain: &str) -> bool {
         let parts: Vec<&str> = domain.split('.').collect();
         if parts.len() < 2 { return false; }
         let base = format!("{}.{}", parts[parts.len()-2], parts[parts.len()-1]);
@@ -308,7 +309,9 @@ impl PolicyEngine {
     }
 
 
-    pub fn evaluate(&self, domain: &str, device_id: Option<&str>) -> PolicyDecision {
+    /// Evaluate mutable policy state without the static phishing heuristic. This
+    /// lets callers release a policy lock before doing cacheable CPU work.
+    pub fn evaluate_without_typosquatting(&self, domain: &str, device_id: Option<&str>) -> PolicyDecision {
         let canonical = config::canonical_domain(domain);
         let domain = canonical.as_str();
         if self.emergency_mode {
@@ -360,16 +363,18 @@ impl PolicyEngine {
         if Self::matches(domain, &self.explicit_deny) || Self::matches(base_domain, &self.explicit_deny) {
             return PolicyDecision::Blocked(BlockReason::ExplicitDeny);
         }
-
-
-
-        // 7. Typosquatting Defense
-        if Self::is_typosquatting(domain) {
-            return PolicyDecision::Blocked(BlockReason::Phishing);
-        }
-
-
         PolicyDecision::Allowed(AllowReason::Normal)
+    }
+
+    pub fn evaluate(&self, domain: &str, device_id: Option<&str>) -> PolicyDecision {
+        let decision = self.evaluate_without_typosquatting(domain, device_id);
+        if matches!(decision, PolicyDecision::Allowed(AllowReason::Normal))
+            && Self::is_typosquatting(&config::canonical_domain(domain))
+        {
+            PolicyDecision::Blocked(BlockReason::Phishing)
+        } else {
+            decision
+        }
     }
 }
 
@@ -412,6 +417,13 @@ mod tests {
         });
         assert_eq!(engine.evaluate("tiktok.com", None), PolicyDecision::Blocked(BlockReason::ScheduledBlock));
         assert_eq!(engine.evaluate("app.tiktok.com", None), PolicyDecision::Blocked(BlockReason::ScheduledBlock));
+    }
+
+    #[test]
+    fn typosquatting_can_run_after_releasing_shared_policy_state() {
+        let engine=PolicyEngine::new(Profile::Balanced);
+        assert_eq!(engine.evaluate_without_typosquatting("paypa1.com",None),PolicyDecision::Allowed(AllowReason::Normal));
+        assert_eq!(engine.evaluate("paypa1.com",None),PolicyDecision::Blocked(BlockReason::Phishing));
     }
 }
 
