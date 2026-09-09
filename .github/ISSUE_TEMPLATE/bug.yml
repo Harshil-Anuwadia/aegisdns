@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible problem with AegisDNS
+title: '[Bug] '
+body:
+  - type: markdown
+    attributes:
+      value: 'Do not include passwords, bearer tokens, private DNS history or vulnerability details in a public issue. See the repository Security tab for private reporting options.'
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+      description: Run git rev-parse --short HEAD from your checkout.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Deployment environment
+      description: OS, architecture, Docker Engine or Desktop, and installer or manual deployment. For UI issues include browser and screen size.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use example domains and synthetic data where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted logs or screenshots
+      description: Remove secrets, client addresses and private query history before sharing.

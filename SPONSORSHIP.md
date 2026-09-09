@@ -12,11 +12,11 @@ Choose a one-time or recurring amount on GitHub Sponsors. Financial support is o
 
 Businesses that depend on AegisDNS can help fund maintenance and public development. These are suggested commitments to discuss, not checkout tiers or service contracts:
 
-| Commitment | Suggested contribution | Proposed recognition |
-| --- | --- | --- |
-| Maintenance sponsor | US$250/month | Optional linked company name in the public sponsor directory; public development updates |
-| Project sponsor | US$1,000/month | Optional company name and description in the directory; acknowledgment in public funding updates |
-| Funded engineering | Agreed project quote | Publicly released improvement with agreed acceptance criteria and optional sponsor acknowledgment |
+| Commitment          | Suggested contribution | Proposed recognition                                                                              |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Maintenance sponsor | US$250/month           | Optional linked company name in the public sponsor directory; public development updates          |
+| Project sponsor     | US$1,000/month         | Optional company name and description in the directory; acknowledgment in public funding updates  |
+| Funded engineering  | Agreed project quote   | Publicly released improvement with agreed acceptance criteria and optional sponsor acknowledgment |
 
 Contributions of other amounts are welcome. Recognition and any reporting arrangements must be agreed with the maintainer. GitHub handles voluntary sponsorship payments and its own payment terms. Sponsorship does not include an uptime guarantee, priority incident response or engineering deliverables. Do not pay a project quote until scope, availability and payment arrangements have been agreed in writing.
 

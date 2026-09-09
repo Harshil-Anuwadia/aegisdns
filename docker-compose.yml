@@ -16,9 +16,9 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - aegisdns_data:/var/lib/aegisdns
-      - ./config.json:/app/config.json:ro
-      - ./blocklists:/var/lib/aegisdns/blocklists:ro
-      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro
+      - ./config.json:/app/config.json:ro,z
+      - ./blocklists:/var/lib/aegisdns/blocklists:ro,z
+      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro,z
     cap_drop:
       - ALL
     # Used by the entrypoint only to migrate file ownership and drop to uid 10001.
@@ -46,7 +46,7 @@ services:
     read_only: true
     user: "10001:10001"
     volumes:
-      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro
+      - ./openroot.json:/var/lib/aegisdns/openroot.json:ro,z
     cap_drop:
       - ALL
     security_opt:

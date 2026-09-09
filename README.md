@@ -45,8 +45,8 @@ Risk checks are heuristics. They can produce false positives and do not establis
 ### Requirements
 
 - A Linux host with a stable LAN or Tailscale address.
-- Git, curl, and a regular user account with sudo access.
-- Docker Engine and the Docker Compose plugin. The installer can install Docker when missing.
+- Git, curl, Python 3.10 or newer, and a regular user account with sudo access.
+- Local, rootful Docker Engine and the Docker Compose plugin. The interactive installer offers to install missing Docker using its official script.
 - Port 53 available for DNS over both UDP and TCP.
 
 The supplied Compose configuration uses Linux host networking to preserve client IP addresses. Windows includes an `install.bat` helper, but Docker Desktop networking can obscure client identity. Use native Linux when per-device filtering or DHCP is required.
@@ -58,18 +58,18 @@ Run these commands in a fresh checkout as your regular user, not as root:
 ```bash
 git clone https://github.com/Harshil-Anuwadia/aegisdns.git
 cd aegisdns
-cp openroot.example.json openroot.json
-./install.sh --no-tailscale
+./install.sh
 ```
 
-The local-zone configuration must exist before installation. For an existing checkout, retain your own `openroot.json` rather than replacing it with the example.
+The installer creates `openroot.json` from its example when missing and preserves an existing local-zone configuration.
 
-The installer prepares host configuration, builds the containers, and installs the `aegis` CLI. It requests sudo access for host changes. To use its Tailscale setup, run `./install.sh` without `--no-tailscale` instead.
+The guided terminal installer validates your configuration, builds the images, installs the `aegis` CLI, and starts the service. It backs up host DNS before changing it, then checks protected dashboard access and DNS over UDP and TCP. LAN setup is the default; use `./install.sh --tailscale` for a connected Tailscale address or `./install.sh --no-start` to prepare without starting.
 
-Start the service and retrieve your dashboard credentials:
+Progress follows actual setup stages. Existing configuration is preserved, private logs help diagnose failures, and a failed startup triggers stop-and-restore recovery. See the [installation and removal guide](docs/INSTALLATION.md) for unattended setup, recovery, and platform limits.
+
+After setup, check the service and retrieve your dashboard credentials:
 
 ```bash
-aegis start
 aegis status
 aegis credentials
 ```
@@ -157,6 +157,16 @@ Authenticated HTTP POST :5381 ──► Custom action endpoint
 Unbound handles external DNS resolution, validation, and response caching. AegisDNS applies policy before resolution and inspects returned data, including CNAME targets, against the requesting device's rules. Query records and relationship observations are stored locally in SQLite.
 
 Custom actions use a separate authenticated HTTP listener. **A DNS lookup does not execute a webhook or command.**
+
+## Uninstall
+
+```bash
+aegis uninstall
+# Or, from the checkout:
+./uninstall.sh
+```
+
+Removal stops this installation, restores its saved host DNS state, and removes its matching CLI link. Stored data is kept by default. To also delete the Compose-managed data volume, run `./uninstall.sh --purge` and confirm `DELETE`. Configuration, local blocklists, source, Docker, and Tailscale remain. Move client devices to another DNS resolver before removal. If restoration fails, the backup and recovery tools are retained.
 
 ## Configuration
 

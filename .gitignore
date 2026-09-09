@@ -21,6 +21,7 @@ ui/playwright-report/
 # Editor directories and files
 .vscode
 .idea
+.obsidian/
 *.suo
 *.ntvs*
 *.njsproj
@@ -52,3 +53,14 @@ config.json
 .dns-backup/
 
 openroot.json
+
+# Installer lock and Python bytecode
+.aegis-setup.lock
+**/__pycache__/
+
+# Local project website and launch workspace (published separately)
+/website/
+/assets/launch/
+/docs/LAUNCH*.md
+/ui/launch.config.ts
+/ui/launch/

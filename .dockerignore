@@ -16,3 +16,8 @@ patch_live_tab.sh
 patch.rs
 wipe_all.sh
 scalpel-sop
+.aegis-setup.lock
+**/__pycache__
+website
+.obsidian
+assets/launch

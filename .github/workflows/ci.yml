@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev clang
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Check shell syntax
+        run: bash -n install.sh uninstall.sh aegis docker-entrypoint.sh
+      - name: Test installer and DNS recovery without host changes
+        run: python3 -m unittest discover -s tests -v
+      - name: Check a fresh Compose configuration
+        run: |
+          cp config.example.json config.json
+          cp openroot.example.json openroot.json
+          mkdir -p blocklists
+          docker compose config --quiet
+      - name: Test workspace
+        run: cargo +stable test --workspace --locked
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-failure-evidence
+          path: ui/test-results/
+          retention-days: 7
