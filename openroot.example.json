@@ -1,7 +1,7 @@
 {
   "a_records": {
     "dashboard.root": "127.0.0.1",
-    "home.aegis": "100.x.x.x",
+    "home.aegis": "100.64.0.1",
     "router.root": "192.168.1.1"
   }
 }
