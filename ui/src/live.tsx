@@ -56,8 +56,12 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           typeof data.client_ip === "string" &&
           typeof data.timestamp === "string" &&
           typeof data.status === "string"
-        )
+        ) {
+          if (!data.timestamp) {
+            data.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+          }
           buffer.current.unshift(data);
+        }
         buffer.current = buffer.current.slice(0, 500);
       } catch {
         /* Ignore malformed events without interrupting the stream. */
