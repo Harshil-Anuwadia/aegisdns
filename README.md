@@ -18,6 +18,10 @@
   <a href="https://github.com/sponsors/Harshil-Anuwadia">Sponsor</a>
 </p>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="AegisDNS dashboard demo" width="900">
+</p>
+
 ---
 
 AegisDNS gives you control over the DNS requests made by devices on your network. It combines domain filtering, device-specific rules, heuristic risk checks, and local query analytics with a validating Unbound resolver.
