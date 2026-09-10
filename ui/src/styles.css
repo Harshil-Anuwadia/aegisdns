@@ -2551,3 +2551,7 @@ td .form fieldset {
     padding-inline: 0;
   }
 }
+
+.react-flow:fullscreen {
+  background: var(--bg);
+}

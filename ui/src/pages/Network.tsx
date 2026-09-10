@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   Background,
   Controls,
+  ControlButton,
   Handle,
   Position,
   ReactFlow,
@@ -9,7 +10,7 @@ import {
   type Node as FlowNode,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Globe2, Monitor, Network as NetworkIcon, Shield } from "lucide-react";
+import { Globe2, Expand, Shrink, Monitor, Network as NetworkIcon, Shield } from "lucide-react";
 import { number, useApi } from "../api";
 import type { Graph, GraphNode } from "../types";
 import {
@@ -59,6 +60,13 @@ export default function Network() {
     [minCount, setMinCount] = useState("1"),
     [selected, setSelected] = useState<GraphNode | null>(null),
     [device, setDevice] = useState("");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
   const query = useApi<Graph>(
     `/graph?hours=${hours}&limit=${limit}&min_count=${minCount}&domain=${encodeURIComponent(domain)}`,
     15000,
@@ -97,8 +105,7 @@ export default function Network() {
             .reduce((sum, e) => sum + e.count, 0);
         return score(b.id) - score(a.id);
       });
-    const columns = new Map<number, number>();
-    const nodes = raw.map((n) => {
+    const nodeCols = raw.map((n) => {
       const column =
         n.kind === "device"
           ? 0
@@ -117,13 +124,32 @@ export default function Network() {
                 ].includes(n.kind)
               ? 3
               : 4;
-      const row = columns.get(column) || 0;
-      columns.set(column, row + 1);
-      const lane = Math.floor(row / 12);
+      return { n, column };
+    });
+
+    const columns = new Map<number, number>();
+    for (const { column } of nodeCols) {
+      columns.set(column, (columns.get(column) || 0) + 1);
+    }
+    
+    let currentX = 0;
+    const columnOffsets = new Map<number, number>();
+    for (let c = 0; c <= 4; c++) {
+      columnOffsets.set(c, currentX);
+      const count = columns.get(c) || 0;
+      const lanes = Math.max(1, Math.ceil(count / 15));
+      currentX += lanes * 280 + 200;
+    }
+
+    const columnCounters = new Map<number, number>();
+    const nodes = nodeCols.map(({ n, column }) => {
+      const row = columnCounters.get(column) || 0;
+      columnCounters.set(column, row + 1);
+      const lane = Math.floor(row / 15);
       return {
         id: n.id,
         type: "relationship",
-        position: { x: column * 680 + lane * 270, y: (row % 12) * 95 },
+        position: { x: (columnOffsets.get(column) || 0) + lane * 280, y: (row % 15) * 85 },
         data: {
           label: n.label,
           kind: n.kind,
@@ -281,10 +307,23 @@ export default function Network() {
                   )
                 }
                 onPaneClick={() => setSelected(null)}
-                proOptions={{ hideAttribution: false }}
+                proOptions={{ hideAttribution: true }}
               >
                 <Background color="var(--border)" gap={22} size={1} />
-                <Controls showInteractive={false} />
+                <Controls showInteractive={false}>
+                  <ControlButton 
+                    onClick={(e) => {
+                      if (document.fullscreenElement) {
+                        document.exitFullscreen();
+                      } else {
+                        (e.target as HTMLElement).closest('.react-flow')?.requestFullscreen();
+                      }
+                    }} 
+                    title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                  >
+                    {isFullscreen ? <Shrink size={14} strokeWidth={2.5} /> : <Expand size={14} strokeWidth={2.5} />}
+                  </ControlButton>
+                </Controls>
               </ReactFlow>
             ) : (
               <Empty title="No relationships in this window">
