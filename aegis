@@ -28,24 +28,44 @@ DASHBOARD_PORT="5380"
 API="http://localhost:$DASHBOARD_PORT/api"
 
 # ── Colors ──────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
+# 256-color palette matching the installer (setup.py) design system
+C_GREEN='\033[38;5;35m'
+C_GREEN_BOLD='\033[1;38;5;35m'
+C_BLUE='\033[38;5;33m'
+C_BLUE_BOLD='\033[1;38;5;33m'
+C_AMBER='\033[38;5;179m'
+C_AMBER_BOLD='\033[1;38;5;179m'
+C_RED='\033[38;5;167m'
+C_RED_BOLD='\033[1;38;5;167m'
+C_MUTED='\033[38;5;245m'
+C_WHITE_BOLD='\033[1;38;5;255m'
+C_BRAND='\033[1;97;48;5;24m'
 BOLD='\033[1m'
-DIM='\033[2m'
 NC='\033[0m'
+# Legacy aliases for compatibility with existing code in this file
+RED="$C_RED" GREEN="$C_GREEN" YELLOW="$C_AMBER" CYAN="$C_BLUE" BLUE="$C_BLUE" DIM="$C_MUTED" MAGENTA="$C_AMBER"
 if [ ! -t 1 ] || [ -n "${NO_COLOR+x}" ] || [ "${TERM:-}" = dumb ]; then
-    RED='' GREEN='' YELLOW='' CYAN='' BLUE='' MAGENTA='' BOLD='' DIM='' NC=''
+    C_GREEN='' C_GREEN_BOLD='' C_BLUE='' C_BLUE_BOLD='' C_AMBER='' C_AMBER_BOLD=''
+    C_RED='' C_RED_BOLD='' C_MUTED='' C_WHITE_BOLD='' C_BRAND='' BOLD='' NC=''
+    RED='' GREEN='' YELLOW='' CYAN='' BLUE='' DIM='' MAGENTA=''
 fi
 
-ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
-fail() { echo -e "  ${RED}✗${NC} $*"; }
-warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
-info() { echo -e "  ${CYAN}→${NC} $*"; }
-hdr()  { echo -e "\n${BOLD}$*${NC}\n"; }
+# ── Output primitives (matching installer aesthetic) ─────────
+#   6-space indent for status lines, consistent with setup.py
+ok()     { echo -e "      ${C_GREEN_BOLD}✓${NC}  $*"; }
+fail()   { echo -e "      ${C_RED_BOLD}×${NC}  $*"; }
+warn()   { echo -e "      ${C_AMBER_BOLD}!${NC}  ${C_AMBER}$*${NC}"; }
+info()   { echo -e "      ${C_BLUE_BOLD}›${NC}  ${C_MUTED}$*${NC}"; }
+detail() { echo -e "      ${C_MUTED}›  $*${NC}"; }
+hdr() {
+    local title="$*"
+    local width=54
+    echo ""
+    echo -e "  ${C_BRAND} AEGISDNS ${NC}"
+    echo -e "  ${C_WHITE_BOLD}${title}${NC}"
+    echo -e "  ${C_MUTED}$(printf '─%.0s' $(seq 1 $width))${NC}"
+    echo ""
+}
 
 # ── Helpers ─────────────────────────────────────────────────
 DOCKER_CMD=()
@@ -1468,74 +1488,61 @@ cmd_version() {
     fi
 }
 
-# ── Help ────────────────────────────────────────────────────
+### ── Help ────────────────────────────────────────────────────
 
 cmd_help() {
-    echo -e "
-${BOLD}AegisDNS CLI v${VERSION}${NC} — Control your DNS fortress
-
-${BOLD}USAGE${NC}
-  aegis <command> [args]
-
-${BOLD}CORE${NC}
-  ${CYAN}start${NC}                       Start AegisDNS and activate DNS blocking
-  ${CYAN}stop${NC}                        Stop AegisDNS and restore original DNS
-  ${CYAN}restart${NC}                     Restart the container (refreshes IP too)
-  ${CYAN}status${NC}                      Full system status at a glance
-
-${BOLD}BLOCKING${NC}
-  ${CYAN}allow${NC}   ${DIM}<domain> [device]${NC}   Whitelist a domain
-  ${CYAN}deny${NC}    ${DIM}<domain> [device]${NC}   Block a domain
-  ${CYAN}remove${NC}  ${DIM}<domain> [device]${NC}   Remove an allow/deny rule
-  ${CYAN}policy${NC}                      Show all current rules
-  ${CYAN}safesearch${NC} ${DIM}[on|off]${NC}        Toggle SafeSearch enforcement
-
-${BOLD}MONITORING${NC}
-  ${CYAN}stats${NC}   ${DIM}[device-ip]${NC}         Query stats + top domains
-  ${CYAN}device add${NC} ${DIM}<ip> <name>${NC}       Register a device (e.g. phone, laptop)
-  ${CYAN}device remove${NC} ${DIM}<ip>${NC}            Unregister a device
-  ${CYAN}device list${NC}                  List all registered devices
-  ${CYAN}logs${NC}    ${DIM}[N]${NC}                 Show last N log lines (default: 50)
-  ${CYAN}logs -f${NC}                     Follow logs live
-  ${CYAN}quarantine${NC}                  Show quarantined devices
-  ${CYAN}unquarantine${NC} ${DIM}<ip>${NC}           Release a device from quarantine
-
-${BOLD}TOOLS${NC}
-  ${CYAN}test${NC}    ${DIM}[domain]${NC}            Test if DNS resolution & blocking work
-  ${CYAN}risk${NC}    ${DIM}<domain>${NC}             Analyze domain threat risk score
-  ${CYAN}dashboard${NC}                   Open web dashboard in browser
-  ${CYAN}credentials${NC}                 Show the generated dashboard login
-  ${CYAN}ip${NC}                          Show all network/IP info
-  ${CYAN}config${NC}  ${DIM}[show|reset]${NC}        View or reset config files
-  ${CYAN}flush${NC}   ${DIM}[timeframe]${NC}         Clear query logs
-
-${BOLD}MANAGEMENT${NC}
-  ${CYAN}build${NC}                       Build the Docker image
-  ${CYAN}rebuild${NC}                     Build from scratch (no cache)
-  ${CYAN}update${NC}                      Git pull + rebuild + restart
-  ${CYAN}reset${NC}                       ${YELLOW}Wipe all data${NC} — logs, devices, policies, lists
-  ${CYAN}setup${NC}                       Guided installation, build and startup
-  ${CYAN}uninstall${NC} [--purge]           Guided removal; stored data kept by default
-  ${CYAN}restore-dns${NC}                 Restore saved host DNS after a failed setup
-  ${CYAN}version${NC}                     Show version info
-  ${CYAN}help${NC}                        Show this help
-
-${BOLD}EXAMPLES${NC}
-  aegis start                     ${DIM}# Start blocking${NC}
-  aegis stop                      ${DIM}# Stop and restore normal DNS${NC}
-  aegis device add 100.64.0.1 Phone  ${DIM}# Register your phone${NC}
-  aegis device add 100.64.0.2 Laptop ${DIM}# Register your laptop${NC}
-  aegis device list               ${DIM}# See all registered devices${NC}
-  aegis deny facebook.com         ${DIM}# Block facebook globally${NC}
-  aegis deny tiktok.com 10.0.0.5  ${DIM}# Block tiktok for one device${NC}
-  aegis allow youtube.com         ${DIM}# Whitelist youtube${NC}
-  aegis stats                     ${DIM}# Global stats${NC}
-  aegis stats 100.64.0.1          ${DIM}# Stats for a specific device${NC}
-  aegis test google.com           ${DIM}# Verify DNS works${NC}
-  aegis risk sketchy-site.xyz     ${DIM}# Check threat score${NC}
-  aegis safesearch on             ${DIM}# Force SafeSearch${NC}
-  aegis logs -f                   ${DIM}# Watch logs live${NC}
-"
+    printf '\n'
+    printf '  \033[1;97;48;5;24m AEGISDNS \033[0m  \033[1;38;5;255mAegisDNS CLI v%s\033[0m  \033[38;5;245m— Control your DNS fortress\033[0m\n' "$VERSION"
+    printf '  \033[38;5;245m──────────────────────────────────────────────────────\033[0m\n'
+    printf '\n'
+    printf '  \033[1;38;5;255mUSAGE\033[0m  \033[38;5;245maegis <command> [options]\033[0m\n'
+    printf '\n'
+    # Description column: visible position 32 from line start (4 indent + 28 content)
+    printf '  \033[1;38;5;255mCONTROL\033[0m\n'
+    printf '    \033[1;38;5;33mstart\033[0m                       Start AegisDNS and take over DNS\n'
+    printf '    \033[1;38;5;33mstop\033[0m                        Stop and restore your original DNS\n'
+    printf '    \033[1;38;5;33mrestart\033[0m                     Restart and refresh your network IP\n'
+    printf '    \033[1;38;5;33mstatus\033[0m                      Live stats, DNS state, and health\n'
+    printf '\n'
+    printf '  \033[1;38;5;255mBLOCKING\033[0m\n'
+    printf '    \033[1;38;5;33mallow\033[0m  \033[38;5;245m<domain>\033[0m             Let a domain through for everyone\n'
+    printf '    \033[1;38;5;33mdeny\033[0m   \033[38;5;245m<domain>\033[0m             Block a domain for everyone\n'
+    printf '    \033[1;38;5;33mallow\033[0m  \033[38;5;245m<domain> <ip>\033[0m        Let a domain through for one device\n'
+    printf '    \033[1;38;5;33mdeny\033[0m   \033[38;5;245m<domain> <ip>\033[0m        Block a domain for one device only\n'
+    printf '    \033[1;38;5;33mremove\033[0m \033[38;5;245m<domain>\033[0m             Remove an allow or deny rule\n'
+    printf '    \033[1;38;5;33mpolicy\033[0m                      See all active rules\n'
+    printf '    \033[1;38;5;33msafesearch\033[0m \033[38;5;245m[on|off]\033[0m         Enforce SafeSearch on all devices\n'
+    printf '\n'
+    printf '  \033[1;38;5;255mDEVICES\033[0m\n'
+    printf '    \033[1;38;5;33mdevice add\033[0m    \033[38;5;245m<ip> <name>\033[0m   Register and name a device\n'
+    printf '    \033[1;38;5;33mdevice remove\033[0m \033[38;5;245m<ip>\033[0m           Remove a device\n'
+    printf '    \033[1;38;5;33mdevice list\033[0m                   See all registered devices\n'
+    printf '    \033[1;38;5;33mstats\033[0m         \033[38;5;245m[ip]\033[0m           Query counts, block rate, top domains\n'
+    printf '    \033[1;38;5;33mquarantine\033[0m                    Devices flagged for suspicious activity\n'
+    printf '    \033[1;38;5;33munquarantine\033[0m  \033[38;5;245m<ip>\033[0m           Release a quarantined device\n'
+    printf '\n'
+    printf '  \033[1;38;5;255mINSIGHTS\033[0m\n'
+    printf '    \033[1;38;5;33mlogs\033[0m    \033[38;5;245m[N]\033[0m                 Show last N log lines \033[38;5;245m(default: 50)\033[0m\n'
+    printf '    \033[1;38;5;33mlogs -f\033[0m                     Follow DNS queries live\n'
+    printf '    \033[1;38;5;33mtest\033[0m    \033[38;5;245m[domain]\033[0m            Verify DNS is resolving and blocking\n'
+    printf '    \033[1;38;5;33mrisk\033[0m    \033[38;5;245m<domain>\033[0m            Threat score for any domain\n'
+    printf '    \033[1;38;5;33mdashboard\033[0m                   Open the web dashboard in your browser\n'
+    printf '    \033[1;38;5;33mcredentials\033[0m                 Show your dashboard login\n'
+    printf '\n'
+    printf '  \033[1;38;5;255mMANAGEMENT\033[0m\n'
+    printf '    \033[1;38;5;33mupdate\033[0m                      Pull latest changes and rebuild\n'
+    printf '    \033[1;38;5;33mreset\033[0m                       \033[38;5;179mWipe all logs, devices, and rules\033[0m\n'
+    printf '    \033[1;38;5;33muninstall\033[0m                   Remove AegisDNS from this machine\n'
+    printf '    \033[1;38;5;33mrestore-dns\033[0m                 Recover your DNS if setup failed\n'
+    printf '\n'
+    printf '  \033[38;5;245m──────────────────────────────────────────────────────\033[0m\n'
+    printf '  \033[1;38;5;255mQUICK START\033[0m\n'
+    printf '    \033[38;5;245maegis deny ads.com\033[0m                   Block a site for everyone\n'
+    printf '    \033[38;5;245maegis deny tiktok.com 10.0.0.5\033[0m       Block for one device only\n'
+    printf '    \033[38;5;245maegis device add 10.0.0.5 Phone\033[0m       Name a device on your network\n'
+    printf '    \033[38;5;245maegis stats\033[0m                           See what is being blocked today\n'
+    printf '    \033[38;5;245maegis logs -f\033[0m                         Watch DNS queries live\n'
+    printf '\n'
 }
 
 # ── Main ────────────────────────────────────────────────────
