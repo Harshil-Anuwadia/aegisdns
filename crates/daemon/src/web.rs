@@ -69,6 +69,7 @@ pub async fn start_web_server(
         .route("/api/classify", post(set_classification))
         .route("/api/recent", get(get_recent))
         .route("/api/live-feed", get(live_feed_stream))
+        .route("/api/favicon/status", get(get_favicon_status))
         .route("/api/favicon", get(get_favicon))
         .route("/api/lists", get(get_lists))
         .route("/api/blocklists", post(post_blocklist))
@@ -950,12 +951,146 @@ pub struct FaviconQuery {
     domain: String,
 }
 
-pub async fn get_favicon(axum::extract::Query(params): axum::extract::Query<FaviconQuery>) -> axum::response::Response {
-    let _ = params.domain;
+const FAVICON_CACHE_LIMIT: usize = 512;
+const FAVICON_MAX_BYTES: usize = 128 * 1024;
+
+// In-process favicon cache using only stdlib — no extra deps needed.
+// Stores (content-type, raw bytes) per domain, populated on first request.
+type FaviconEntry = (String, Vec<u8>);
+static FAVICON_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>>> =
+    std::sync::OnceLock::new();
+static FAVICON_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn favicon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>> {
+    FAVICON_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn favicon_client() -> &'static reqwest::Client {
+    FAVICON_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .user_agent("AegisDNS favicon proxy")
+            .build()
+            .expect("favicon HTTP client configuration is valid")
+    })
+}
+
+fn valid_favicon_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+fn allowed_favicon_content_type(value: &str) -> Option<&'static str> {
+    match value.split(';').next()?.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Some("image/x-icon"),
+        _ => None,
+    }
+}
+
+fn remote_favicon_lookup_enabled() -> bool {
+    matches!(
+        std::env::var("AEGIS_FAVICON_REMOTE_LOOKUP").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+#[derive(Serialize)]
+struct FaviconStatus {
+    enabled: bool,
+}
+
+async fn get_favicon_status() -> Json<FaviconStatus> {
+    Json(FaviconStatus {
+        enabled: remote_favicon_lookup_enabled(),
+    })
+}
+
+pub async fn get_favicon(
+    axum::extract::Query(params): axum::extract::Query<FaviconQuery>,
+) -> axum::response::Response {
+    // Only accept DNS hostnames. This avoids using the endpoint as a generic
+    // request relay and keeps the upstream query unambiguous.
+    let domain = params.domain.trim().to_lowercase();
+    if !valid_favicon_domain(&domain) {
+        return no_favicon();
+    }
+
+    // Serve from cache
+    if let Ok(cache) = favicon_cache().lock() {
+        if let Some((ct, data)) = cache.get(&domain) {
+            return axum::response::Response::builder()
+                .header("Content-Type", ct.clone())
+                .header("Cache-Control", "public, max-age=86400")
+                .body(axum::body::Body::from(data.clone()))
+                .unwrap_or_else(|_| no_favicon());
+        }
+    }
+
+    // A live icon lookup reveals a requested hostname to its provider. Keep
+    // this opt-in: the default never sends DNS history to a third party.
+    if !remote_favicon_lookup_enabled() {
+        return no_favicon();
+    }
+
+    // Fetch from upstream — server-side only, browser never contacts Google.
+    let url = format!("https://www.google.com/s2/favicons?domain={}&sz=32", domain);
+    if let Ok(mut resp) = favicon_client().get(url).send().await {
+        if resp.status().is_success()
+            && resp.content_length().is_none_or(|length| length <= FAVICON_MAX_BYTES as u64)
+        {
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .and_then(allowed_favicon_content_type);
+            if let Some(content_type) = content_type {
+                let mut data = Vec::new();
+                while let Ok(Some(chunk)) = resp.chunk().await {
+                    if data.len().saturating_add(chunk.len()) > FAVICON_MAX_BYTES {
+                        return no_favicon();
+                    }
+                    data.extend_from_slice(&chunk);
+                }
+                // Only cache if it looks like a real icon (> 64 bytes).
+                if data.len() > 64 {
+                    if let Ok(mut cache) = favicon_cache().lock() {
+                        if cache.len() >= FAVICON_CACHE_LIMIT && !cache.contains_key(&domain) {
+                            if let Some(key) = cache.keys().next().cloned() {
+                                cache.remove(&key);
+                            }
+                        }
+                        cache.insert(domain, (content_type.to_owned(), data.clone()));
+                    }
+                    return axum::response::Response::builder()
+                        .header("Content-Type", content_type)
+                        .header("Cache-Control", "public, max-age=86400")
+                        .body(axum::body::Body::from(data))
+                        .unwrap_or_else(|_| no_favicon());
+                }
+            }
+        }
+    }
+
+    no_favicon()
+}
+
+fn no_favicon() -> axum::response::Response {
     axum::response::Response::builder()
-        .header("Content-Type", "image/svg+xml")
-        .header("Cache-Control", "public, max-age=86400")
-        .body(axum::body::Body::from(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#888"/><path d="M2 12h20M12 2v20" stroke="#888"/></svg>"##)).unwrap()
+        .status(axum::http::StatusCode::NO_CONTENT)
+        .header("Cache-Control", "no-store")
+        .body(axum::body::Body::empty())
+        .unwrap()
 }
 
 // ============================================================
@@ -1252,4 +1387,16 @@ fn csv_cell(value:&str)->String {
         assert!(!body.contains(marker)); assert!(body.contains("&lt;script&gt;"));
     }
     #[test] fn csv_quotes_formula_and_delimiters() { assert_eq!(csv_cell("=1+1"),"\"'=1+1\""); assert_eq!(csv_cell("a,b"),"\"a,b\""); }
+    #[test]
+    fn favicon_proxy_rejects_malformed_hosts_and_active_content() {
+        assert!(valid_favicon_domain("cdn.example.com"));
+        assert!(valid_favicon_domain("localhost"));
+        assert!(!valid_favicon_domain(".example.com"));
+        assert!(!valid_favicon_domain("example..com"));
+        assert!(!valid_favicon_domain("-example.com"));
+        assert!(!valid_favicon_domain("example.com/evil"));
+        assert_eq!(allowed_favicon_content_type("image/png; charset=binary"), Some("image/png"));
+        assert_eq!(allowed_favicon_content_type("image/svg+xml"), None);
+        assert_eq!(allowed_favicon_content_type("text/html"), None);
+    }
 }

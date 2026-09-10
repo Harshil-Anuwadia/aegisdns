@@ -176,6 +176,7 @@ The default container stores persistent application data under `/var/lib/aegisdn
 | --- | --- |
 | `AEGIS_HOST_IP` | Host IPv4 address used for custom-action DNS answers and the default action listener. Set by the installer or in `.env`. |
 | `AEGIS_ADMIN_PASSWORD` | Optional admin password override, 16–256 characters. Otherwise, a generated password is persisted in the data directory. |
+| `AEGIS_FAVICON_REMOTE_LOOKUP` | Disabled by default. Set to `true` only if you accept that Google’s favicon service receives the domain names displayed in the dashboard. |
 | `TZ` | Server timezone for schedules; the supplied Compose default is `UTC`. Daily analytics and privacy budgets use UTC. |
 | `AEGIS_ACTION_EXECUTABLES` | Colon-separated absolute executable paths permitted for shell-type actions. Empty by default. |
 | `AEGIS_IP_METADATA` | Optional path to a local CIDR/ASN/country metadata file. Defaults to `ip-metadata.csv` in the data directory. |

@@ -461,7 +461,7 @@ restore_dns() {
         preference=$(cat "$BACKUP_TAILSCALE")
         case "$preference" in true|false) ;; *) fail "Invalid saved Tailscale preference"; return 1 ;; esac
         if command -v tailscale &>/dev/null; then
-            sudo tailscale set --accept-dns="$preference" || failed=true
+            if ! sudo tailscale set --accept-dns="$preference" 2>/dev/null; then warn "Tailscale daemon is unreachable; its saved DNS preference could not be restored"; fi
         else
             warn "Tailscale is unavailable; its saved DNS preference could not be restored"
             failed=true
@@ -563,10 +563,16 @@ cmd_start() {
     if command -v tailscale &>/dev/null; then
         local ts_status
         ts_status=$(tailscale status 2>&1 || true)
-        if echo "$ts_status" | grep -qi "stopped\|logged out\|NeedsLogin"; then
-            warn "Tailscale is not logged in"
-            echo -e "     Run: ${DIM}sudo tailscale up${NC} to log in"
-            echo ""
+        if echo "$ts_status" | grep -qi "stopped\|not running"; then
+            info "Tailscale is not running"
+        elif echo "$ts_status" | grep -qi "logged out\|NeedsLogin\|not logged in"; then
+            info "Tailscale requires authentication to connect..."
+            if sudo tailscale up; then
+                ok "Tailscale connected"
+            else
+                warn "Tailscale is not logged in — cannot start in Tailscale mode"
+                return 1
+            fi
         else
             ok "Tailscale is running"
         fi
@@ -646,8 +652,51 @@ cmd_stop() {
     else
         warn "Docker is unavailable; attempting DNS restoration only. Containers may still exist."
     fi
-    restore_dns || return 1
+    restore_dns || warn "DNS restoration encountered errors"
     ok "Host DNS restoration completed"
+
+    # ── Stop Tailscale ────────────────────────────────────────
+    if command -v tailscale &>/dev/null; then
+        local ts_status
+        ts_status=$(tailscale status 2>&1 || true)
+        if echo "$ts_status" | grep -qi "stopped\|not running"; then
+            detail "Tailscale is already stopped"
+        else
+            info "Stopping Tailscale..."
+            if sudo tailscale down >/dev/null 2>&1; then
+                ok "Tailscale stopped"
+            else
+                warn "Could not stop Tailscale (may need sudo)"
+            fi
+        fi
+    fi
+
+    # ── DNS Safety Net ──
+    # If resolv.conf is missing or points to Tailscale (which is now stopped),
+    # the host will have no internet. We must clean it up and ensure a fallback.
+    if [ ! -f /etc/resolv.conf ] || grep -iq "100.100.100.100\|tailscale" /etc/resolv.conf 2>/dev/null; then
+        info "Cleaning up Tailscale DNS to prevent internet loss..."
+        local fallback_applied=false
+
+        if command -v systemctl &>/dev/null && systemctl cat systemd-resolved &>/dev/null; then
+            sudo systemctl enable --now systemd-resolved >/dev/null 2>&1 || true
+            sudo rm -f /etc/resolv.conf 2>/dev/null || true
+            if [ -f /run/systemd/resolve/stub-resolv.conf ]; then
+                sudo ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null
+                fallback_applied=true
+            elif [ -f /lib/systemd/resolv.conf ]; then
+                sudo ln -s /lib/systemd/resolv.conf /etc/resolv.conf 2>/dev/null
+                fallback_applied=true
+            fi
+            [ "$fallback_applied" = true ] && ok "Restored systemd-resolved as DNS fallback"
+        fi
+
+        if [ "$fallback_applied" = false ]; then
+            sudo rm -f /etc/resolv.conf 2>/dev/null || true
+            sudo bash -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
+            ok "Added 8.8.8.8 to resolv.conf as DNS fallback"
+        fi
+    fi
 }
 
 cmd_restart() {
@@ -794,7 +843,7 @@ cmd_logs() {
     local lines="${1:-50}"
     hdr "AegisDNS Logs  ${DIM}(last $lines lines)${NC}"
     cd "$AEGIS_DIR"
-    docker_cmd compose logs --tail="$lines" --no-log-prefix 2>/dev/null || fail "Could not fetch logs"
+    docker_cmd compose logs --tail="$lines" --no-log-prefix 2>/dev/null | sed -u 's/^/    /' || fail "Could not fetch logs"
     echo ""
 }
 
@@ -802,14 +851,14 @@ cmd_logs_follow() {
     require_docker
     hdr "AegisDNS Logs  ${DIM}(live — Ctrl+C to exit)${NC}"
     cd "$AEGIS_DIR"
-    docker_cmd compose logs -f --tail=30 --no-log-prefix 2>/dev/null || fail "Could not fetch logs"
+    docker_cmd compose logs -f --tail=30 --no-log-prefix 2>/dev/null | sed -u 's/^/    /' || fail "Could not fetch logs"
 }
 
 cmd_build() {
     hdr "Building AegisDNS"
     require_docker
     cd "$AEGIS_DIR"
-    docker_cmd compose build
+    docker_cmd compose build 2>&1 | sed -u 's/^/      /'
     echo ""
     ok "Build complete"
     echo ""
@@ -819,7 +868,7 @@ cmd_rebuild() {
     hdr "Rebuilding AegisDNS  ${DIM}(no cache)${NC}"
     require_docker
     cd "$AEGIS_DIR"
-    docker_cmd compose build --no-cache
+    docker_cmd compose build --no-cache 2>&1 | sed -u 's/^/      /'
     echo ""
     ok "Rebuild complete"
     echo ""
@@ -1393,7 +1442,9 @@ cmd_update() {
     # Rebuild
     require_docker
     info "Rebuilding container..."
-    if ! docker_cmd compose build 2>&1 | tail -5; then
+    local build_output
+    if ! build_output=$(docker_cmd compose build 2>&1); then
+        printf '%s\n' "$build_output" | tail -10 | sed 's/^/      /'
         fail "Container build failed"
         return 1
     fi

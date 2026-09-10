@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Download, Pause, Play, Search, SlidersHorizontal } from "lucide-react";
 import { useLive } from "../live";
 import { api, number, send, time, useApi } from "../api";
+import { DomainIcon } from "../components/DomainIcon";
 import type { Device, QueryEvent } from "../types";
 import {
   AsyncForm,
@@ -164,6 +165,7 @@ export default function Traffic() {
                     className="plain-button domain-link"
                     onClick={() => setSelected(q)}
                   >
+                    <DomainIcon domain={q.domain} size="compact" />
                     {q.domain}
                   </button>
                 </td>

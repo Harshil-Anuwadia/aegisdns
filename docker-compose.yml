@@ -13,6 +13,8 @@ services:
     environment:
       AEGIS_HOST_IP: ${AEGIS_HOST_IP:-}
       AEGIS_ADMIN_PASSWORD: ${AEGIS_ADMIN_PASSWORD:-}
+      # Disabled by default: remote favicon services learn requested domains.
+      AEGIS_FAVICON_REMOTE_LOOKUP: ${AEGIS_FAVICON_REMOTE_LOOKUP:-false}
       TZ: ${TZ:-UTC}
     volumes:
       - aegisdns_data:/var/lib/aegisdns

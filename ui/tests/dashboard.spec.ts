@@ -93,6 +93,17 @@ test("navigation, command search, themes, and keyboard dismissal", async ({
     await expect(page.getByRole("dialog")).toHaveCount(0);
   }
 });
+test("disabled remote favicon lookup shows domain names without icon requests", async ({ page }) => {
+  let faviconRequests = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/favicon") faviconRequests += 1;
+  });
+  await mockApi(page);
+  await page.goto("/#overview");
+  await expect(page.locator(".destination").first()).toBeVisible();
+  await expect(page.locator(".domain-icon")).toHaveCount(0);
+  expect(faviconRequests).toBe(0);
+});
 test("query filtering, pause, detail rule and export", async ({ page }) => {
   const writes = await mockApi(page);
   await page.goto("/#traffic");

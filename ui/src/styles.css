@@ -732,9 +732,44 @@ tbody tr:hover {
 .domain-link {
   font-weight: 500;
   overflow-wrap: anywhere;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 .domain-link:hover {
   color: var(--accent);
+}
+.domain-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-elevated);
+  color: var(--text-muted);
+}
+.domain-icon-compact {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+.domain-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 3px;
+}
+.domain-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.domain-icon-compact svg {
+  width: 12px;
+  height: 12px;
 }
 .domain-ranking {
   padding: 0 23px 10px;

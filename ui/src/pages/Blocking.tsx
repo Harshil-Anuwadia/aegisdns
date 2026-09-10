@@ -15,6 +15,7 @@ import {
   Toggle,
 } from "../components/ui";
 import { DomainRanking } from "./Overview";
+import { DomainIcon } from "../components/DomainIcon";
 
 export default function Blocking() {
   const stats = useApi<Stats>("/stats", 10000),
@@ -95,7 +96,8 @@ export default function Blocking() {
             {domains.data[kind as keyof Domains].map((d) => (
               <tr key={d.domain}>
                 <td>
-                  <a href={`#network?domain=${encodeURIComponent(d.domain)}`}>
+                  <a className="domain-link" href={`#network?domain=${encodeURIComponent(d.domain)}`}>
+                    <DomainIcon domain={d.domain} size="compact" />
                     {d.domain}
                   </a>
                 </td>

@@ -167,7 +167,7 @@ class Runner:
     def __init__(self, ui, log):
         self.ui, self.log = ui, log
 
-    def run(self, args, *, capture=False, timeout=1800, interactive=False, check=True, activity='Working'):
+    def run(self, args, *, capture=False, timeout=1800, interactive=False, check=True, activity='Working', preserve_tty=False):
         args = [str(a) for a in args]
         if interactive:
             result = subprocess.run(args, cwd=ROOT, timeout=timeout)
@@ -178,8 +178,11 @@ class Runner:
         env = dict(os.environ, NO_COLOR='1', COMPOSE_ANSI='never', BUILDKIT_PROGRESS='plain')
         # A private scratch file avoids pipe deadlocks and keeps large build output off the UI.
         with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output,
-                                       stderr=subprocess.STDOUT, env=env, start_new_session=not WINDOWS)
+            kwargs = {'cwd': ROOT, 'stdout': output, 'stderr': subprocess.STDOUT, 'env': env}
+            if not preserve_tty:
+                kwargs['stdin'] = subprocess.DEVNULL
+                kwargs['start_new_session'] = not WINDOWS
+            process = subprocess.Popen(args, **kwargs)
             frame = 0
             encoding = (getattr(sys.stdout, 'encoding', None) or '').lower()
             spinner = (('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
@@ -351,15 +354,26 @@ class Setup:
         if not shutil.which('sudo'):
             raise SetupError('sudo is required. Install sudo, then run setup as your regular user.')
         if not self.sudo_announced:
-            self.ui.say('Administrator permission is required for host DNS and the aegis command.')
+            self.ui.say(self.ui.ink('Administrator permission is required for host DNS and the aegis command.', self.ui.MUTED), indent='      ')
             self.sudo_announced = True
-        command = ['sudo', '-n', 'true'] if self.args.yes else ['sudo', '-v']
+        
+        # Build custom styled prompt for sudo -p so it aligns perfectly.
+        # \033[38;5;245m is the MUTED color code.
+        prompt = "      \033[38;5;245m›\033[0m  Password: "
+        command = ['sudo', '-n', 'true'] if self.args.yes else ['sudo', '-p', prompt, '-v']
+        
+        # Make sure we don't capture stdout/stderr here so the prompt can be interacted with
         self.runner.run(command, interactive=not self.args.yes, timeout=120)
         return ['sudo', '-n'] if self.args.yes else ['sudo']
 
-    def sudo_run(self, *command, timeout=120):
-        """Run one privileged command without assuming sudo timestamp caching."""
-        prefix = ['sudo', '-n'] if self.args.yes else ['sudo']
+    def sudo_run(self, *command, timeout=120, activity='Working'):
+        """Run one privileged command, allowing custom sudo prompts."""
+        prompt = "      \033[38;5;245m›\033[0m  Password: "
+        prefix = ['sudo', '-n'] if self.args.yes else ['sudo', '-p', prompt]
+        
+        # We must allow interactive mode so sudo can read the password from TTY if needed.
+        # Output from the command itself will print to the terminal, but these are 
+        # usually silent commands like ln or rm.
         return self.runner.run(prefix + list(command), interactive=not self.args.yes,
                                timeout=timeout)
 
@@ -394,7 +408,11 @@ class Setup:
         target = self.backup / f'{name}-install.sh'
         self.runner.run(['curl', '-fL', '--proto', '=https', '--tlsv1.2', '--connect-timeout', '15', '--max-time', '120', url, '-o', target],
                         timeout=130, activity=f'Downloading {name}')
-        self.sudo_run('sh', target, timeout=900)
+        
+        # Ensure sudo cache is fresh so the background spinner isn't interrupted by a prompt
+        self.sudo()
+        prefix = ['sudo', '-n'] if self.args.yes else ['sudo']
+        self.runner.run(prefix + ['sh', target], interactive=False, timeout=900, activity=f'Installing {name}', preserve_tty=True)
 
     def connect_docker(self):
         self.dependency('docker', 'https://get.docker.com')
@@ -460,7 +478,13 @@ class Setup:
             try:
                 return str(ipaddress.IPv4Address(raw))
             except (ValueError, TypeError):
-                raise SetupError('Connect Tailscale first with sudo tailscale up, then retry; or rerun with --no-tailscale for LAN setup.') from None
+                self.ui.say('      \033[38;5;33m›\033[0m  Tailscale requires authentication to connect...')
+                self.sudo_run('tailscale', 'up', timeout=600)
+                raw = self.runner.run(['tailscale', 'ip', '-4'], capture=True, check=False, timeout=15)
+                try:
+                    return str(ipaddress.IPv4Address(raw))
+                except (ValueError, TypeError):
+                    raise SetupError('Tailscale connection failed. Rerun with --no-tailscale for LAN setup.') from None
         # Keep a previously chosen address on reruns unless explicitly overridden.
         env = ROOT / '.env'
         if env.is_file():
@@ -545,10 +569,21 @@ class Setup:
         self.runner.run(self.compose + ['config', '--quiet'], timeout=25)
         self.ui.step(4, 6, 'Build AegisDNS')
         self.ui.say('The first build may take a few minutes.')
+        ts_was_true = False
+        if shutil.which('tailscale'):
+            prefs = self.runner.run(['tailscale', 'debug', 'prefs'], capture=True, check=False) or ''
+            if '"CorpDNS": true' in prefs:
+                ts_was_true = True
+            self.sudo_run('tailscale', 'set', '--accept-dns=false', timeout=15)
+            # Tailscale often leaves its resolv.conf behind after being disabled. We must forcefully 
+            # revert it to systemd-resolved or 8.8.8.8 so Docker can reach the internet during the build.
+            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && (ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > /etc/resolv.conf)', timeout=15)
         self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
                         timeout=self.args.build_timeout, activity='Building container images')
         self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'],
                         timeout=60, activity='Verifying configuration access')
+        if ts_was_true:
+            self.sudo_run('tailscale', 'set', '--accept-dns=true', timeout=15)
         self.ui.done('Images and configuration verified')
         self.ui.step(5, 6, 'Install the command')
         if not WINDOWS:

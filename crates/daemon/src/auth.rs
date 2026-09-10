@@ -32,7 +32,9 @@ pub fn secure_equal(a: &str, b: &str) -> bool {
 }
 
 pub async fn auth_middleware(req: Request<axum::body::Body>, next: Next) -> Response {
-    let public = matches!(req.uri().path(), "/blocked" | "/logo.png" | "/api/favicon");
+    // The favicon endpoint makes outbound requests. Keep it behind the dashboard
+    // credential so the DNS server cannot be used as a public fetch relay.
+    let public = matches!(req.uri().path(), "/blocked" | "/logo.png");
     if !public {
         if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
             && req.headers().get("x-aegis-request").and_then(|v|v.to_str().ok()) != Some("1") {

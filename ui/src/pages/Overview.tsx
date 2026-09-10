@@ -28,6 +28,7 @@ import {
   Status,
   Table,
 } from "../components/ui";
+import { DomainIcon } from "../components/DomainIcon";
 const ActivityChart = lazy(() => import("../components/ActivityChart"));
 
 export default function Overview() {
@@ -235,6 +236,7 @@ export default function Overview() {
                       className="domain-link"
                       href={`#traffic?domain=${encodeURIComponent(q.domain)}`}
                     >
+                      <DomainIcon domain={q.domain} size="compact" />
                       {q.domain}
                     </a>
                   </td>
@@ -281,9 +283,7 @@ export default function Overview() {
                 href={`#network?domain=${encodeURIComponent(d.domain)}`}
                 className="destination"
               >
-                <span className="domain-monogram">
-                  {d.domain?.charAt(0).toUpperCase()}
-                </span>
+                <DomainIcon domain={d.domain} />
                 <div>
                   <strong>{d.domain}</strong>
                   <small>{number(d.count)} queries</small>
@@ -317,6 +317,7 @@ export function DomainRanking({
           href={`#network?domain=${encodeURIComponent(d.domain)}`}
         >
           <span className="rank-index">{String(i + 1).padStart(2, "0")}</span>
+          <DomainIcon domain={d.domain} size="compact" />
           <div>
             <strong>{d.domain}</strong>
             <span className="rank-track">

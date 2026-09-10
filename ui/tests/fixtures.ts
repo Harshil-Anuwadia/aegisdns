@@ -8,6 +8,7 @@ const events = Array.from({ length: 50 }, (_, i) => ({
   client_ip: i % 2 ? "192.168.1.20" : "192.168.1.30",
 }));
 export const responses: Record<string, unknown> = {
+  "/favicon/status": { enabled: false },
   "/stats": {
     queries_today: 14832,
     blocked_today: 3260,
