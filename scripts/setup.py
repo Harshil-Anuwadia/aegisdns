@@ -29,12 +29,19 @@ class SetupError(Exception):
 
 
 class UI:
-    def __init__(self, plain=False):
+    BLUE = '38;5;33'
+    GREEN = '38;5;35'
+    AMBER = '38;5;179'
+    RED = '38;5;167'
+    MUTED = '38;5;245'
+    WHITE = '38;5;255'
+
+    def __init__(self, plain=False, no_animation=False):
         # The installer has an explicit --plain mode. Interactive runs use color
         # even when a parent application exports TERM=dumb or NO_COLOR globally.
         self.tty = sys.stdout.isatty() and not plain
         self.color = self.tty
-        self.motion = self.tty and not os.environ.get('AEGIS_NO_ANIMATION')
+        self.motion = self.tty and not no_animation and not os.environ.get('AEGIS_NO_ANIMATION')
         if WINDOWS and self.tty:
             try:
                 import ctypes
@@ -48,44 +55,107 @@ class UI:
     def ink(self, text, code='36'):
         return f'\033[{code}m{text}\033[0m' if self.color else text
 
+    @property
+    def width(self):
+        return self.available_width()
+
+    def available_width(self, indent='  '):
+        return max(20, min(72, shutil.get_terminal_size((80, 24)).columns - len(indent) - 2))
+
     def say(self, text='', indent='  '):
-        width = max(28, min(76, shutil.get_terminal_size((80, 24)).columns - 4))
+        width = self.available_width(indent)
         text = str(text)
         encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
         try:
             text.encode(encoding)
         except UnicodeEncodeError:
-            text = text.translate(str.maketrans({'─':'-', '✓':'OK', '…':'...', '’':"'", '‘':"'", '·':'/'})).encode(encoding, errors='replace').decode(encoding)
+            text = text.translate(str.maketrans({'─':'-', '━':'=', '✓':'OK', '×':'X', '›':'>', '…':'...', '’':"'", '‘':"'", '·':'/'})).encode(encoding, errors='replace').decode(encoding)
         for line in text.splitlines() or ['']:
-            for wrapped in textwrap.wrap(line, width=width, replace_whitespace=False) or ['']:
+            visible = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', line)
+            # Preserve styling on lines that fit. For wrapped prose, remove the
+            # invisible control bytes so terminal width stays exact.
+            source = line if len(visible) <= width else visible
+            chunks = [source] if len(visible) <= width else textwrap.wrap(source, width=width, replace_whitespace=False)
+            for wrapped in chunks or ['']:
                 print(indent + wrapped, flush=True)
 
     def welcome(self, uninstall=False):
         print()
-        self.say(self.ink('AEGISDNS', '1;36'))
-        self.say('Safe removal' if uninstall else 'Secure DNS for your network')
+        brand = ' AEGISDNS ' if self.color else 'AEGISDNS'
+        self.say(self.ink(brand, '1;97;48;5;24'))
+        self.say(self.ink('Safe removal' if uninstall else 'Private DNS for your network', self.MUTED))
+        self.say(self.ink('─' * min(self.width, 54), self.MUTED))
         print()
 
     def step(self, index, total, title):
         if index > 1:
             print()
-        self.say(self.ink(f'{index:02d}', '1;36') + '  ' + self.ink(title, '1;37') + '  ' + self.ink(f'{index}/{total}', '2'))
+        prefix = self.ink(f'{index:02d}', f'1;{self.BLUE}')
+        heading = self.ink(title, f'1;{self.WHITE}')
+        counter_text = f'{index} of {total}'
+        title_width = 4 + len(title)
+        if title_width + 2 + len(counter_text) <= self.width:
+            gap = self.width - title_width - len(counter_text)
+            self.say(f'{prefix}  {heading}{" " * gap}{self.ink(counter_text, self.MUTED)}')
+        else:
+            self.say(f'{prefix}  {heading}')
+
+        progress_width = max(12, min(32, self.available_width('      ') - 5))
+        filled = max(1, round(index * progress_width / total))
+        bar = self.ink('━' * filled, self.BLUE) + self.ink('─' * (progress_width - filled), self.MUTED)
+        percent = self.ink(f'{round(index * 100 / total):>3}%', self.MUTED)
+        self.say(f'{bar} {percent}', indent='      ')
 
     def done(self, message):
-        self.say(self.ink('✓ ' + message, '1;32'))
+        self.status('✓', self.GREEN, message)
+
+    def detail(self, message):
+        self.status('›', self.MUTED, message, muted=True)
 
     def warn(self, message):
-        self.say(self.ink('!  ' + message, '1;33'))
+        self.status('!', self.AMBER, message)
+
+    def status(self, symbol, color, message, muted=False):
+        indent = '      '
+        chunks = textwrap.wrap(str(message), width=max(12, self.available_width(indent) - 2),
+                               replace_whitespace=False) or ['']
+        styled = lambda value: self.ink(value, color) if muted else value
+        self.say(self.ink(symbol, f'1;{color}') + ' ' + styled(chunks[0]), indent=indent)
+        for chunk in chunks[1:]:
+            self.say('  ' + styled(chunk), indent=indent)
+
+    def error(self, message):
+        self.say(self.ink('×', f'1;{self.RED}') + '  ' + message)
+
+    def ask(self, question, default=None):
+        label = question + (self.ink(f'  [{default}]', self.MUTED) if default else '')
+        self.say(self.ink('?', f'1;{self.BLUE}') + '  ' + self.ink(label, f'1;{self.WHITE}'), indent='      ')
+        try:
+            return input('      ' + self.ink('› ', f'1;{self.BLUE}')).strip()
+        except EOFError:
+            raise SetupError('Input closed. No further changes were made.') from None
+
+    def summary(self, title, rows):
+        print()
+        self.say(self.ink('✓', f'1;{self.GREEN}') + '  ' + self.ink(title, f'1;{self.WHITE}'))
+        self.say(self.ink('─' * min(self.width, 54), self.MUTED))
+        label_width = max((len(label) for label, _ in rows), default=0)
+        for label, value in rows:
+            if label_width + 2 + len(value) <= self.width:
+                self.say(self.ink(label.ljust(label_width), self.MUTED) + '  ' + self.ink(value, f'1;{self.WHITE}'))
+            else:
+                self.say(self.ink(label, self.MUTED))
+                self.say(self.ink(value, f'1;{self.WHITE}'), indent='    ')
 
     def confirm(self, question, yes=False, default=False, word=None):
         if yes:
             return True
         if not sys.stdin.isatty():
             raise SetupError('No interactive input. Review --help, then use --yes for an unattended run.')
-        suffix = f' Type {word}: ' if word else (' [Y/n] ' if default else ' [y/N] ')
-        self.say(self.ink(question, '1;37'))
+        suffix = f'Type {word}' if word else ('Y/n' if default else 'y/N')
+        self.say(self.ink('?', f'1;{self.BLUE}') + '  ' + self.ink(question, f'1;{self.WHITE}') + '  ' + self.ink(f'[{suffix}]', self.MUTED), indent='      ')
         try:
-            answer = input('  ' + suffix).strip()
+            answer = input('      ' + self.ink('› ', f'1;{self.BLUE}')).strip()
         except EOFError:
             raise SetupError('Input closed. No further changes were made.') from None
         if word:
@@ -97,7 +167,7 @@ class Runner:
     def __init__(self, ui, log):
         self.ui, self.log = ui, log
 
-    def run(self, args, *, capture=False, timeout=1800, interactive=False, check=True):
+    def run(self, args, *, capture=False, timeout=1800, interactive=False, check=True, activity='Working'):
         args = [str(a) for a in args]
         if interactive:
             result = subprocess.run(args, cwd=ROOT, timeout=timeout)
@@ -111,18 +181,22 @@ class Runner:
             process = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output,
                                        stderr=subprocess.STDOUT, env=env, start_new_session=not WINDOWS)
             frame = 0
-            spinner = '|/-\\'
+            encoding = (getattr(sys.stdout, 'encoding', None) or '').lower()
+            spinner = (('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+                       if 'utf' in encoding else ('|', '/', '-', '\\'))
+            rendered = False
             try:
-                if self.ui.motion:
-                    print('\033[?25l', end='', flush=True)
                 while process.poll() is None:
                     elapsed = int(time.monotonic() - started)
                     if elapsed > timeout:
                         raise SetupError(f'{Path(args[0]).name} exceeded the {timeout}s timeout.')
-                    if self.ui.motion:
-                        status = self.ui.ink(spinner[frame % 4], '1;36')
+                    if self.ui.motion and time.monotonic() - started >= .35:
+                        if not rendered:
+                            print('\033[?25l', end='', flush=True)
+                            rendered = True
+                        status = self.ui.ink(spinner[frame % len(spinner)], f'1;{self.ui.BLUE}')
                         elapsed_text = self.ui.ink(f'{elapsed}s', '2')
-                        print(f'\r\033[2K  {status} Working  {elapsed_text}', end='', flush=True)
+                        print(f'\r\033[2K      {status}  {activity}  {elapsed_text}', end='', flush=True)
                         frame += 1
                     time.sleep(.15)
                 output.seek(0)
@@ -151,7 +225,7 @@ class Runner:
                 with self.log.open('ab') as log:
                     log.write(f'\n[{Path(args[0]).name}; exit {process.returncode}]\n'.encode())
                     shutil.copyfileobj(output, log)
-                if self.ui.motion:
+                if rendered:
                     print('\r\033[2K\033[?25h', end='', flush=True)
 
 
@@ -318,7 +392,8 @@ class Setup:
         if not shutil.which('curl'):
             raise SetupError('Install curl before using --install-deps.')
         target = self.backup / f'{name}-install.sh'
-        self.runner.run(['curl', '-fL', '--proto', '=https', '--tlsv1.2', '--connect-timeout', '15', '--max-time', '120', url, '-o', target], timeout=130)
+        self.runner.run(['curl', '-fL', '--proto', '=https', '--tlsv1.2', '--connect-timeout', '15', '--max-time', '120', url, '-o', target],
+                        timeout=130, activity=f'Downloading {name}')
         self.sudo_run('sh', target, timeout=900)
 
     def connect_docker(self):
@@ -385,7 +460,7 @@ class Setup:
             try:
                 return str(ipaddress.IPv4Address(raw))
             except (ValueError, TypeError):
-                raise SetupError('Connect Tailscale first with sudo tailscale up, then retry; or use LAN setup without --tailscale.') from None
+                raise SetupError('Connect Tailscale first with sudo tailscale up, then retry; or rerun with --no-tailscale for LAN setup.') from None
         # Keep a previously chosen address on reruns unless explicitly overridden.
         env = ROOT / '.env'
         if env.is_file():
@@ -439,11 +514,13 @@ class Setup:
     def install(self):
         self.ui.step(1, 6, 'Check this machine')
         self.requirements()
-        self.ui.say(f'Install from {ROOT}')
+        self.ui.detail(f'Source: {ROOT}')
+        network = 'fixed IPv4 address' if self.args.ip else ('Tailscale (default)' if self.args.tailscale else 'LAN')
+        self.ui.detail(f'Network: {network}')
         if not WINDOWS and not self.args.no_start:
-            self.ui.say('This changes this host’s DNS. Your router and other devices are untouched.')
+            self.ui.detail('Changes this host’s DNS; routers and other devices stay untouched.')
         if self.args.install_deps:
-            self.ui.say('Missing Docker or requested Tailscale will be installed using official scripts.')
+            self.ui.detail('Missing dependencies will use their official installers.')
         if not self.ui.confirm('Continue with this plan?', self.args.yes, default=True):
             self.ui.say('Setup cancelled. Thank you for considering AegisDNS.'); return
         self.ui.step(2, 6, 'Connect to Docker')
@@ -457,10 +534,7 @@ class Setup:
         self.ui.step(3, 6, 'Prepare your configuration')
         self.selected_ip = self.address()
         if not self.args.yes and not self.args.ip:
-            try:
-                answer = input(f'  Server IPv4 [{self.selected_ip}]: ').strip()
-            except EOFError:
-                raise SetupError('Input closed before configuration was saved.') from None
+            answer = self.ui.ask('Server IPv4', self.selected_ip)
             if answer:
                 parsed_ip = ipaddress.IPv4Address(answer)
                 if parsed_ip.is_multicast or parsed_ip.is_unspecified or str(parsed_ip) == '255.255.255.255':
@@ -471,8 +545,10 @@ class Setup:
         self.runner.run(self.compose + ['config', '--quiet'], timeout=25)
         self.ui.step(4, 6, 'Build AegisDNS')
         self.ui.say('The first build may take a few minutes.')
-        self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []), timeout=self.args.build_timeout)
-        self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'], timeout=60)
+        self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
+                        timeout=self.args.build_timeout, activity='Building container images')
+        self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'],
+                        timeout=60, activity='Verifying configuration access')
         self.ui.done('Images and configuration verified')
         self.ui.step(5, 6, 'Install the command')
         if not WINDOWS:
@@ -484,35 +560,36 @@ class Setup:
         if not self.args.no_start:
             self.started = True
             if WINDOWS:
-                self.runner.run(self.compose + ['up', '-d'], timeout=180)
+                self.runner.run(self.compose + ['up', '-d'], timeout=180, activity='Starting DNS services')
             else:
                 self.cli('restart')
             self.ui.say('Checking dashboard and DNS…')
             self.ready()
             self.started = False
             self.ui.done('DNS is answering; dashboard is protected')
-        print()
-        self.ui.say(self.ui.ink('AegisDNS is ready', '1;32'))
+        rows = []
         if self.args.no_start:
-            self.ui.say('Start when ready: docker compose up -d' if WINDOWS else 'Start when ready: aegis start')
+            rows.append(('Start', 'docker compose up -d' if WINDOWS else 'aegis start'))
         else:
-            self.ui.say('Dashboard   http://localhost:5380')
-        self.ui.say('Credentials docker exec aegisdns cat /var/lib/aegisdns/admin-password' if WINDOWS else 'Credentials aegis credentials')
-        self.ui.say(f'DNS address {self.selected_ip}')
-        self.ui.say('Next: test this address on one device.')
+            rows.append(('Dashboard', 'http://localhost:5380'))
+        rows.extend([
+            ('Credentials', 'docker exec aegisdns cat /var/lib/aegisdns/admin-password' if WINDOWS else 'aegis credentials'),
+            ('DNS address', self.selected_ip),
+            ('Next', 'Test the DNS address on one device'),
+        ])
+        self.ui.summary('AegisDNS is ready', rows)
 
     def uninstall(self):
         self.ui.step(1, 4, 'Review removal')
         self.requirements()
-        self.ui.say('Before removal, move any devices or router settings that use this server to another DNS resolver.')
-        self.ui.say('Remove: this installation’s containers and its matching CLI link.')
-        self.ui.say('Delete: Docker data volume (rules, devices, history, credentials).' if self.args.purge else 'Keep: stored data, configuration, images, and source files.')
-        self.ui.say('Docker, Tailscale, and other applications remain installed.')
+        self.ui.detail('First move connected devices or your router to another DNS resolver.')
+        self.ui.detail('Containers and the matching aegis command will be removed.')
+        self.ui.detail('The data volume will be deleted.' if self.args.purge else 'Data, configuration, images, and source will be kept.')
         if not self.ui.confirm('Remove AegisDNS?', self.args.yes, word='DELETE' if self.args.purge else None):
             self.ui.say('Removal cancelled. Nothing was removed.'); return
         self.ui.step(2, 4, 'Stop this installation')
         self.connect_docker()
-        self.runner.run(self.compose + ['down'], timeout=180)
+        self.runner.run(self.compose + ['down'], timeout=180, activity='Stopping DNS services')
         self.ui.done('Containers removed')
         self.ui.step(3, 4, 'Restore host DNS')
         if not WINDOWS:
@@ -521,7 +598,7 @@ class Setup:
         # Do not purge data or remove recovery tools if stopping/restoring failed.
         self.ui.step(4, 4, 'Finish cleanup')
         if self.args.purge:
-            self.runner.run(self.compose + ['down', '--volumes'], timeout=90)
+            self.runner.run(self.compose + ['down', '--volumes'], timeout=90, activity='Removing stored data')
             self.ui.done('Compose-managed data removed. Local configuration and blocklist files remain.')
         if not WINDOWS:
             target = CLI_LINK
@@ -529,9 +606,7 @@ class Setup:
                 self.sudo_run('rm', '--', target, timeout=15)
             elif target.exists() or target.is_symlink():
                 self.ui.warn('The aegis command belongs to another installation; it was left in place.')
-        print()
-        self.ui.say(self.ui.ink('AegisDNS removed', '1;32'))
-        self.ui.say('Source and configuration remain in this directory.')
+        self.ui.summary('AegisDNS removed', [('Kept', 'Source and local configuration')])
 
     def recover(self):
         if not self.started:
@@ -548,15 +623,16 @@ class Setup:
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description='AegisDNS terminal installer and uninstaller. LAN setup is the default.')
+    parser = argparse.ArgumentParser(description='AegisDNS terminal installer and uninstaller. Tailscale setup is the default.')
     parser.add_argument('action', choices=('install', 'uninstall'))
     parser.add_argument('--yes', '-y', action='store_true', help='accept the reviewed plan; requires working noninteractive sudo on Linux')
     parser.add_argument('--plain', action='store_true', help='plain text, no color or animation')
+    parser.add_argument('--no-animation', action='store_true', help='keep color but disable animated progress')
     parser.add_argument('--purge', action='store_true', help='uninstall: also remove this Compose project’s Docker data')
     parser.add_argument('--ip', help='install: use this server IPv4 address')
     network = parser.add_mutually_exclusive_group()
-    network.add_argument('--tailscale', action='store_true', help='install: use an already connected Tailscale address')
-    network.add_argument('--no-tailscale', action='store_true', help='install: LAN setup (the default; retained for compatibility)')
+    network.add_argument('--tailscale', action='store_true', help='install: use a connected Tailscale address (default)')
+    network.add_argument('--no-tailscale', action='store_true', help='install: use a LAN address instead of Tailscale')
     parser.add_argument('--install-deps', action='store_true', help='install missing Docker or requested Tailscale using official scripts')
     parser.add_argument('--no-start', action='store_true', help='build and prepare without changing host DNS or starting DNS services')
     parser.add_argument('--rebuild', action='store_true', help='build without Docker cache')
@@ -564,6 +640,8 @@ def parse_args(argv=None):
     parser.add_argument('--build-timeout', type=int, default=3600, help='maximum build duration in seconds (default: 3600)')
     parser.add_argument('--ready-timeout', type=int, default=120, help='DNS readiness timeout in seconds (default: 120)')
     args = parser.parse_args(argv)
+    if args.action == 'install' and not args.no_tailscale:
+        args.tailscale = True
     if args.purge and args.action != 'uninstall':
         parser.error('--purge is only valid with uninstall')
     if args.action == 'uninstall' and (args.ip or args.tailscale or args.install_deps or args.no_start or args.rebuild):
@@ -590,7 +668,7 @@ def main(argv=None):
     if hasattr(signal, 'SIGHUP'):
         signal.signal(signal.SIGHUP, interrupted)
     args = parse_args(argv)
-    ui = UI(args.plain)
+    ui = UI(args.plain, args.no_animation)
     ui.welcome(args.action == 'uninstall')
     setup = None
     try:
@@ -616,7 +694,7 @@ def main(argv=None):
         return 0
     except (KeyboardInterrupt, SetupError, OSError, ValueError, subprocess.SubprocessError) as error:
         print()
-        ui.warn('Cancelled by you.' if isinstance(error, KeyboardInterrupt) else str(error))
+        ui.error('Cancelled by you.' if isinstance(error, KeyboardInterrupt) else str(error))
         if setup:
             setup.recover()
         ui.say('Fix the reported issue and rerun the same command. Existing data is retained unless an explicit purge completed.')

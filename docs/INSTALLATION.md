@@ -1,6 +1,6 @@
 # Install and remove AegisDNS
 
-The installer presents a short plan, progress through six stages, and a clear result. It uses a restrained terminal interface with an activity indicator during long commands. `--plain`, redirected output, and `TERM=dumb` disable terminal effects. `NO_COLOR` disables color; `AEGIS_NO_ANIMATION=1` disables animation. No extra TUI package is required.
+The installer presents six aligned stages, a compact progress rail, clear status colors, and named activity indicators for long commands. Interactive runs use color even when a parent application exports `TERM=dumb` or `NO_COLOR`. Use `--plain` for unstyled output, or `--no-animation` to retain color without movement. Redirected output is automatically plain. `AEGIS_NO_ANIMATION=1` also disables animation. No extra TUI package is required.
 
 ## Install on Linux
 
@@ -10,7 +10,7 @@ Use a complete checkout on a native Linux host with Python 3.10+, curl, sudo, an
 ./install.sh
 ```
 
-Run as a regular user. The installer asks visibly for sudo access, offers to install missing Docker using its official script, and lets you adjust the detected server IPv4 address. Docker group membership is not changed. The Docker endpoint must be local and rootful; remote engines and rootless host networking are not supported by this host-DNS flow.
+Run as a regular user. Tailscale is the default network path. The installer uses the connected Tailscale IPv4 address and offers its official installer when the command is missing; authentication still requires `sudo tailscale up`. Use `--no-tailscale` when this server should use its LAN address. The installer asks visibly for sudo access and offers to install missing Docker using its official script. Docker group membership is not changed. The Docker endpoint must be local and rootful; remote engines and rootless host networking are not supported by this host-DNS flow.
 
 Interactive privileged commands use the normal visible sudo prompt. The installer
 does not assume that a previous `sudo -v` remains cached, so it also works with
@@ -43,11 +43,12 @@ Open **http://localhost:5380** on the DNS host. The username is `admin`; passwor
 | Command | Effect |
 | --- | --- |
 | `./install.sh --ip 192.168.1.20` | Use an explicit stable IPv4 address. |
-| `./install.sh --tailscale` | Use a connected Tailscale address. Missing Tailscale can be installed through its official script; sign-in remains a separate step. |
-| `./install.sh --no-tailscale` | LAN setup; retained for compatibility. |
+| `./install.sh --tailscale` | Explicitly select the default Tailscale path. |
+| `./install.sh --no-tailscale` | Use a detected LAN address instead of Tailscale. |
 | `./install.sh --no-start` | Build and install the CLI without starting or taking over host DNS. |
 | `./install.sh --rebuild` | Ignore the Docker build cache. |
 | `./install.sh --plain` | Plain terminal output. |
+| `./install.sh --no-animation` | Keep colors but disable animated activity indicators. |
 | `./install.sh --build-timeout 7200` | Allow up to two hours for the build. |
 | `./install.sh --ready-timeout 240` | Allow up to four minutes for DNS readiness. |
 

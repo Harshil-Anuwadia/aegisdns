@@ -248,6 +248,13 @@ class SetupTests(unittest.TestCase):
         self.ui.welcome();self.ui.step(1,6,'Check');self.ui.done('Ready')
         self.assertNotIn('\033',self.output.getvalue())
 
+    def test_progress_is_below_stage_title(self):
+        self.ui.step(2, 6, 'Connect to Docker')
+        lines = [line for line in self.output.getvalue().splitlines() if line.strip()]
+        self.assertIn('Connect to Docker', lines[0])
+        self.assertNotIn('━', lines[0])
+        self.assertIn('━', lines[1])
+
     def test_legacy_ascii_terminal_falls_back_cleanly(self):
         buffer=io.BytesIO()
         stream=io.TextIOWrapper(buffer, encoding='ascii')
@@ -313,8 +320,9 @@ class Arguments(unittest.TestCase):
     def test_invalid_or_unsafe_arguments_fail_before_work(self):
         for args in (['install','--purge'],['install','--ip','999.2.3.4'],['install','--ip','0.0.0.0'],['install','--ip','224.0.0.1'],['uninstall','--install-deps'],['install','--ready-timeout','0']):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit): setup.parse_args(args)
-    def test_lan_and_start_are_default(self):
-        args=setup.parse_args(['install']); self.assertFalse(args.tailscale); self.assertFalse(args.no_start)
+    def test_tailscale_and_start_are_default(self):
+        args=setup.parse_args(['install']); self.assertTrue(args.tailscale); self.assertFalse(args.no_start)
+        lan=setup.parse_args(['install','--no-tailscale']); self.assertFalse(lan.tailscale); self.assertTrue(lan.no_tailscale)
     def test_noninteractive_requires_yes(self):
         with patch('sys.stdin.isatty',return_value=False),contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup.main(['install','--plain']),1)

@@ -63,7 +63,7 @@ cd aegisdns
 
 The installer creates `openroot.json` from its example when missing and preserves an existing local-zone configuration.
 
-The guided terminal installer validates your configuration, builds the images, installs the `aegis` CLI, and starts the service. It backs up host DNS before changing it, then checks protected dashboard access and DNS over UDP and TCP. LAN setup is the default; use `./install.sh --tailscale` for a connected Tailscale address or `./install.sh --no-start` to prepare without starting.
+The guided terminal installer validates your configuration, builds the images, installs the `aegis` CLI, and starts the service. It backs up host DNS before changing it, then checks protected dashboard access and DNS over UDP and TCP. Tailscale is the default network path; the installer uses its connected IPv4 address and offers the official installer when needed. Use `./install.sh --no-tailscale` for a LAN address or `./install.sh --no-start` to prepare without starting.
 
 Progress follows actual setup stages. Existing configuration is preserved, private logs help diagnose failures, and a failed startup triggers stop-and-restore recovery. See the [installation and removal guide](docs/INSTALLATION.md) for unattended setup, recovery, and platform limits.
 
