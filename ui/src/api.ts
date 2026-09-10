@@ -45,13 +45,20 @@ export function useApi<T>(path: string, interval: number | false = false) {
 export const number = (value: number | undefined) =>
   value === undefined ? "—" : value.toLocaleString();
 export function timestamp(value: string) {
-  return new Date(value.includes("T") ? value : value.replace(" ", "T") + "Z");
+  if (!value) return new Date(NaN);
+  // Normalise to ISO 8601 UTC so all entries parse consistently:
+  // "2026-09-10 14:32:01"      → "2026-09-10T14:32:01Z"
+  // "2026-09-10T14:32:01"      → "2026-09-10T14:32:01Z"
+  // "2026-09-10T14:32:01.123Z" → kept as-is
+  let s = value.replace(" ", "T");
+  if (!s.endsWith("Z") && !s.includes("+")) s += "Z";
+  return new Date(s);
 }
 export function time(value: string) {
   const d = timestamp(value);
   return Number.isNaN(d.getTime())
     ? value
-    : d.toLocaleTimeString([], { hour12: false });
+    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 export const rate = (blocked: number, total: number) =>
   total ? ((blocked / total) * 100).toFixed(1) : "0.0";

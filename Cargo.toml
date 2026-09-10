@@ -22,7 +22,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 interprocess = "1.2" # For IPC (Unix domain sockets)
 toml = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "stream"] }
 rustrus = "0.1"
 async-trait = "0.1"
 nix = "0.27"

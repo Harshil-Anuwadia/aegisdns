@@ -62,6 +62,7 @@ hdr() {
     local width=54
     echo ""
     echo -e "  ${C_BRAND} AEGISDNS ${NC}"
+    echo ""
     echo -e "  ${C_WHITE_BOLD}${title}${NC}"
     echo -e "  ${C_MUTED}$(printf '─%.0s' $(seq 1 $width))${NC}"
     echo ""
@@ -550,7 +551,7 @@ check_port53() {
 # ── Commands ────────────────────────────────────────────────
 
 cmd_start() {
-    hdr "Starting AegisDNS"
+    hdr "Starting"
     require_docker
 
     if is_running; then
@@ -608,7 +609,7 @@ cmd_start() {
     cd "$AEGIS_DIR"
     local compose_output
     if compose_output=$(docker_cmd compose up -d 2>&1); then
-        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 || true
+        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 | sed -u 's/^/      /' || true
         # Health check
         info "Waiting for AegisDNS to be ready..."
         if wait_for_api; then
@@ -632,6 +633,7 @@ cmd_start() {
         fi
     else
         echo ""
+        printf '%s\n' "$compose_output" | sed -u 's/^/      /'
         fail "Failed to start container"
         warn "Restoring your DNS to previous state..."
         restore_dns
@@ -641,10 +643,10 @@ cmd_start() {
 }
 
 cmd_stop() {
-    hdr "Stopping AegisDNS"
+    hdr "Stopping"
     if select_docker; then
         cd "$AEGIS_DIR" || return 1
-        if ! docker_cmd compose down; then
+        if ! docker_cmd compose down 2>&1 | sed -u 's/^/      /'; then
             fail "Could not remove all containers; DNS backup and data retained"
             return 1
         fi
@@ -700,7 +702,7 @@ cmd_stop() {
 }
 
 cmd_restart() {
-    hdr "Restarting AegisDNS"
+    hdr "Restarting"
     require_docker
 
     if is_running; then
@@ -717,8 +719,10 @@ cmd_restart() {
 
         # Recreate container in case image was updated
         local compose_output
-        if ! compose_output=$(docker_cmd compose up -d 2>&1); then
-            printf '%s\n' "$compose_output" | tail -5
+        if compose_output=$(docker_cmd compose up -d 2>&1); then
+            printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 | sed -u 's/^/      /' || true
+        else
+            printf '%s\n' "$compose_output" | sed -u 's/^/      /'
             fail "Container restart failed"
             return 1
         fi
@@ -745,7 +749,7 @@ cmd_restart() {
 }
 
 cmd_status() {
-    hdr "AegisDNS Status"
+    hdr "Status"
 
     # ── Container ──
     if is_running; then
@@ -841,7 +845,7 @@ cmd_status() {
 cmd_logs() {
     require_docker
     local lines="${1:-50}"
-    hdr "AegisDNS Logs  ${DIM}(last $lines lines)${NC}"
+    hdr "Logs  ${DIM}(last $lines lines)${NC}"
     cd "$AEGIS_DIR"
     docker_cmd compose logs --tail="$lines" --no-log-prefix 2>/dev/null | sed -u 's/^/    /' || fail "Could not fetch logs"
     echo ""
@@ -849,13 +853,13 @@ cmd_logs() {
 
 cmd_logs_follow() {
     require_docker
-    hdr "AegisDNS Logs  ${DIM}(live — Ctrl+C to exit)${NC}"
+    hdr "Logs  ${DIM}(live — Ctrl+C to exit)${NC}"
     cd "$AEGIS_DIR"
     docker_cmd compose logs -f --tail=30 --no-log-prefix 2>/dev/null | sed -u 's/^/    /' || fail "Could not fetch logs"
 }
 
 cmd_build() {
-    hdr "Building AegisDNS"
+    hdr "Building"
     require_docker
     cd "$AEGIS_DIR"
     docker_cmd compose build 2>&1 | sed -u 's/^/      /'
@@ -865,7 +869,7 @@ cmd_build() {
 }
 
 cmd_rebuild() {
-    hdr "Rebuilding AegisDNS  ${DIM}(no cache)${NC}"
+    hdr "Rebuilding  ${DIM}(no cache)${NC}"
     require_docker
     cd "$AEGIS_DIR"
     docker_cmd compose build --no-cache 2>&1 | sed -u 's/^/      /'
@@ -956,7 +960,7 @@ cmd_remove() {
 cmd_stats() {
     require_running
     local device_qs=""
-    hdr "AegisDNS Stats"
+    hdr "Stats"
     if [ -n "${1:-}" ]; then
         device_qs="?device_id=$(url_encode "$1")"
         info "Filtering: device $1"
@@ -1339,7 +1343,7 @@ cmd_config() {
 
     case "$subcmd" in
         show)
-            hdr "AegisDNS Configuration"
+            hdr "Configuration"
             if [ -f "$AEGIS_DIR/config.json" ]; then
                 echo -e "  ${BOLD}config.json${NC}"
                 sed 's/^/     /' "$AEGIS_DIR/config.json"
@@ -1419,7 +1423,7 @@ cmd_credentials() {
 }
 
 cmd_update() {
-    hdr "Updating AegisDNS"
+    hdr "Updating"
 
     cd "$AEGIS_DIR"
 
@@ -1453,10 +1457,8 @@ cmd_update() {
     # Restart if running
     if is_running; then
         info "Restarting..."
-        if ! docker_cmd compose restart 2>&1 | tail -3; then
-            fail "Container restart failed"
-            return 1
-        fi
+        docker_cmd compose restart 2>&1 | tail -3 | sed -u 's/^/      /' || { fail "Container restart failed"; return 1; }
+        info "Waiting for AegisDNS to be ready..."
         if wait_for_api; then
             ok "AegisDNS updated and running"
         else
@@ -1469,7 +1471,7 @@ cmd_update() {
 }
 
 cmd_reset() {
-    hdr "${YELLOW}Reset AegisDNS${NC}"
+    hdr "${YELLOW}Reset${NC}"
     echo -e "  This will wipe ALL data and start fresh:"
     echo -e "    ${DIM}• Query logs & analytics${NC}"
     echo -e "    ${DIM}• Registered devices${NC}"
@@ -1499,10 +1501,11 @@ cmd_reset() {
         info "Wiping data volume..."
     fi
     
-    if ! docker_cmd compose down -v; then
+    if ! docker_cmd compose down -v 2>&1 | sed -u 's/^/      /'; then
         fail "Could not remove the AegisDNS data volume"
         return 1
     fi
+    
     ok "Container stopped and all data wiped"
 
     # Restart if it was running before
@@ -1510,7 +1513,7 @@ cmd_reset() {
         echo ""
         info "Restarting AegisDNS with clean state..."
         cd "$AEGIS_DIR"
-        if ! docker_cmd compose up -d || ! wait_for_api; then
+        if ! docker_cmd compose up -d 2>&1 | sed -u 's/^/      /' || ! wait_for_api; then
             fail "Data was reset, but AegisDNS did not restart successfully"
             return 1
         fi
@@ -1543,7 +1546,9 @@ cmd_version() {
 
 cmd_help() {
     printf '\n'
-    printf '  \033[1;97;48;5;24m AEGISDNS \033[0m  \033[1;38;5;255mAegisDNS CLI v%s\033[0m  \033[38;5;245m— Control your DNS fortress\033[0m\n' "$VERSION"
+    printf '  \033[1;97;48;5;24m AEGISDNS \033[0m\n'
+    printf '\n'
+    printf '  \033[38;5;245mPrivate DNS for your network\033[0m\n'
     printf '  \033[38;5;245m──────────────────────────────────────────────────────\033[0m\n'
     printf '\n'
     printf '  \033[1;38;5;255mUSAGE\033[0m  \033[38;5;245maegis <command> [options]\033[0m\n'

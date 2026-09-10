@@ -83,6 +83,7 @@ class UI:
         print()
         brand = ' AEGISDNS ' if self.color else 'AEGISDNS'
         self.say(self.ink(brand, '1;97;48;5;24'))
+        print()
         self.say(self.ink('Safe removal' if uninstall else 'Private DNS for your network', self.MUTED))
         self.say(self.ink('─' * min(self.width, 54), self.MUTED))
         print()
@@ -95,8 +96,7 @@ class UI:
         counter_text = f'{index} of {total}'
         title_width = 4 + len(title)
         if title_width + 2 + len(counter_text) <= self.width:
-            gap = self.width - title_width - len(counter_text)
-            self.say(f'{prefix}  {heading}{" " * gap}{self.ink(counter_text, self.MUTED)}')
+            self.say(f'{prefix}  {heading}  {self.ink(counter_text, self.MUTED)}')
         else:
             self.say(f'{prefix}  {heading}')
 
@@ -479,7 +479,7 @@ class Setup:
                 return str(ipaddress.IPv4Address(raw))
             except (ValueError, TypeError):
                 self.ui.say('      \033[38;5;33m›\033[0m  Tailscale requires authentication to connect...')
-                self.sudo_run('tailscale', 'up', timeout=600)
+                self.sudo_run('bash', '-c', 'tailscale up 2>&1 | sed -u "s/^/        /"', timeout=600)
                 raw = self.runner.run(['tailscale', 'ip', '-4'], capture=True, check=False, timeout=15)
                 try:
                     return str(ipaddress.IPv4Address(raw))
@@ -568,7 +568,7 @@ class Setup:
         self.ui.done(f'DNS address: {self.selected_ip}. Existing settings preserved.')
         self.runner.run(self.compose + ['config', '--quiet'], timeout=25)
         self.ui.step(4, 6, 'Build AegisDNS')
-        self.ui.say('The first build may take a few minutes.')
+        self.ui.detail('The first build may take a few minutes.')
         ts_was_true = False
         if shutil.which('tailscale'):
             prefs = self.runner.run(['tailscale', 'debug', 'prefs'], capture=True, check=False) or ''
