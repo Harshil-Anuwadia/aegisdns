@@ -92,6 +92,10 @@ export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   hours: number;
+  edge_limit?: number;
+  min_count?: number;
+  truncated?: boolean;
+  observation_limit?: number;
 }
 export interface Upstream {
   enabled: boolean;

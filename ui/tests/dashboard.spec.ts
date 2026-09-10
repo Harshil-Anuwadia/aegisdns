@@ -182,6 +182,12 @@ test("graph node inspection and history filter", async ({ page }) => {
   );
   await page.getByLabel("Relationship history").selectOption("168");
   await request;
+  const bounded = page.waitForRequest((r) =>
+    r.url().includes("limit=120") && r.url().includes("min_count=20"),
+  );
+  await page.getByLabel("Minimum observations").selectOption("20");
+  await page.getByLabel("Graph size").selectOption("120");
+  await bounded;
 });
 test("failed saves stay open with an actionable error", async ({ page }) => {
   await mockApi(page);

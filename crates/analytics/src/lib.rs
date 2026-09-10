@@ -167,6 +167,7 @@ impl AnalyticsDb {
         let _ = conn.execute("ALTER TABLE dns_relationships ADD COLUMN source TEXT", []);
         let _ = conn.execute("ALTER TABLE dns_relationships ADD COLUMN source_kind TEXT", []);
         conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_domain_time ON dns_relationships(query_domain, observed_at)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_time ON dns_relationships(observed_at)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_source_time ON dns_relationships(source, observed_at)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_client_time ON dns_relationships(client_ip, observed_at)", [])?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_target_time ON dns_relationships(target, observed_at)", [])?;
@@ -348,23 +349,45 @@ impl AnalyticsDb {
     }
 
     pub async fn relationship_graph(&self, domain: Option<&str>, hours: u32) -> anyhow::Result<RelationshipGraph> {
+        self.relationship_graph_with_options(domain, hours, 80, 1).await
+    }
+
+    pub async fn relationship_graph_with_options(&self, domain: Option<&str>, hours: u32, edge_limit: u32, min_count: u32) -> anyhow::Result<RelationshipGraph> {
         let db_path = self.db_path.clone();
         let domain = domain.map(|value|value.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|value| !value.is_empty());
         let hours = hours.clamp(1, 24 * 30);
+        let edge_limit = edge_limit.clamp(20, 200);
+        let min_count = min_count.clamp(1, 10_000);
+        let observation_limit = if domain.is_some() { 250_000 } else { 100_000 };
         tokio::task::spawn_blocking(move || -> anyhow::Result<RelationshipGraph> {
             let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let window = format!("-{hours} hours");
             let sql = if domain.is_some() {
-                "SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
-                 FROM dns_relationships WHERE observed_at >= datetime('now', ?1) AND query_domain IN (
-                    SELECT DISTINCT query_domain FROM dns_relationships
-                    WHERE observed_at >= datetime('now', ?1) AND (query_domain = ?2 OR source = ?2 OR target = ?2)
+                "WITH recent AS (
+                    SELECT query_domain,source,source_kind,relation,target,target_kind,observed_at
+                    FROM dns_relationships WHERE observed_at >= datetime('now', ?1)
+                    ORDER BY observed_at DESC LIMIT ?2
+                 ), matched AS (
+                    SELECT DISTINCT query_domain FROM recent
+                    WHERE query_domain = ?3 OR source = ?3 OR target = ?3
                  )
-                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind ORDER BY MAX(observed_at) DESC LIMIT 500"
+                 SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
+                 FROM recent WHERE query_domain IN (SELECT query_domain FROM matched)
+                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind
+                 HAVING COUNT(*) >= ?4
+                 ORDER BY CASE WHEN COALESCE(source,query_domain) = ?3 OR target = ?3 THEN 0 ELSE 1 END,
+                          COUNT(*) DESC, MAX(observed_at) DESC LIMIT ?5"
             } else {
-                "SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
-                 FROM dns_relationships WHERE observed_at >= datetime('now', ?1)
-                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind ORDER BY MAX(observed_at) DESC LIMIT 500"
+                "WITH recent AS (
+                    SELECT query_domain,source,source_kind,relation,target,target_kind,observed_at
+                    FROM dns_relationships WHERE observed_at >= datetime('now', ?1)
+                    ORDER BY observed_at DESC LIMIT ?2
+                 )
+                 SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
+                 FROM recent
+                 GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind
+                 HAVING COUNT(*) >= ?3
+                 ORDER BY COUNT(*) DESC, MAX(observed_at) DESC LIMIT ?4"
             };
             let mut stmt = conn.prepare(sql)?;
             let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RelationshipEdge> {
@@ -376,10 +399,12 @@ impl AnalyticsDb {
             };
             let mut edges=Vec::new();
             if let Some(ref selected)=domain {
-                for row in stmt.query_map(rusqlite::params![window,selected],map_row)? { edges.push(row?); }
+                for row in stmt.query_map(rusqlite::params![window,observation_limit,selected,min_count,edge_limit + 1],map_row)? { edges.push(row?); }
             } else {
-                for row in stmt.query_map(rusqlite::params![window],map_row)? { edges.push(row?); }
+                for row in stmt.query_map(rusqlite::params![window,observation_limit,min_count,edge_limit + 1],map_row)? { edges.push(row?); }
             }
+            let truncated=edges.len() > edge_limit as usize;
+            edges.truncate(edge_limit as usize);
             let mut nodes=std::collections::BTreeMap::new();
             for edge in &edges {
                 for id in [&edge.source,&edge.target] {
@@ -387,7 +412,7 @@ impl AnalyticsDb {
                     nodes.entry(id.clone()).or_insert_with(||RelationshipNode{id:id.clone(),label:label.into(),kind:kind.into()});
                 }
             }
-            Ok(RelationshipGraph{nodes:nodes.into_values().collect(),edges,hours})
+            Ok(RelationshipGraph{nodes:nodes.into_values().collect(),edges,hours,edge_limit,min_count,truncated,observation_limit})
         }).await?
     }
 
@@ -1013,6 +1038,10 @@ pub struct RelationshipGraph {
     pub nodes: Vec<RelationshipNode>,
     pub edges: Vec<RelationshipEdge>,
     pub hours: u32,
+    pub edge_limit: u32,
+    pub min_count: u32,
+    pub truncated: bool,
+    pub observation_limit: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1076,6 +1105,11 @@ pub struct CustomAction {
         assert!(graph.edges.iter().any(|edge|edge.source=="domain:edge.example"&&edge.relation=="resolves_to"&&edge.count==1));
         let related=db.relationship_graph(Some("edge.example"),24).await.unwrap();
         assert!(related.edges.iter().any(|edge|edge.relation=="requested_by"&&edge.target=="device:192.0.2.8"));
+        let bounded=db.relationship_graph_with_options(None,24,1,1).await.unwrap();
+        assert_eq!(bounded.edge_limit,20);
+        assert!(!bounded.truncated);
+        let filtered=db.relationship_graph_with_options(None,24,20,2).await.unwrap();
+        assert!(filtered.edges.is_empty());
         let summaries=db.privacy_summaries().await.unwrap();
         assert_eq!(summaries.len(),1);
         assert_eq!(summaries[0].tracking_companies,1);

@@ -126,10 +126,13 @@ pub async fn start_web_server(
 struct MyIp { ip: String }
 
 #[derive(Deserialize)]
-struct GraphQuery { domain:Option<String>, hours:Option<u32> }
+struct GraphQuery { domain:Option<String>, hours:Option<u32>, limit:Option<u32>, min_count:Option<u32> }
 
 async fn get_relationship_graph(State(state):State<AppState>,Query(query):Query<GraphQuery>)->Json<analytics::RelationshipGraph>{
-    Json(state.analytics.relationship_graph(query.domain.as_deref(),query.hours.unwrap_or(24)).await.unwrap_or(analytics::RelationshipGraph{nodes:Vec::new(),edges:Vec::new(),hours:query.hours.unwrap_or(24).clamp(1,720)}))
+    let hours=query.hours.unwrap_or(24).clamp(1,720);
+    let edge_limit=query.limit.unwrap_or(60).clamp(20,200);
+    let min_count=query.min_count.unwrap_or(1).clamp(1,10_000);
+    Json(state.analytics.relationship_graph_with_options(query.domain.as_deref(),hours,edge_limit,min_count).await.unwrap_or(analytics::RelationshipGraph{nodes:Vec::new(),edges:Vec::new(),hours,edge_limit,min_count,truncated:false,observation_limit:if query.domain.as_deref().is_some_and(|value|!value.trim().is_empty()){250_000}else{100_000}}))
 }
 
 #[derive(Serialize)]

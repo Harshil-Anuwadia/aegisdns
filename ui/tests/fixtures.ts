@@ -85,6 +85,10 @@ export const responses: Record<string, unknown> = {
   },
   "/graph": {
     hours: 24,
+    edge_limit: 60,
+    min_count: 1,
+    truncated: false,
+    observation_limit: 100000,
     nodes: [
       { id: "device:tv", kind: "device", label: "192.168.1.30" },
       { id: "domain:tracker", kind: "domain", label: "tracker.example.com" },
