@@ -645,7 +645,12 @@ impl AnalyticsDb {
                     conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-7 days')", [])?;
                     conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-7 days')", [])?;
                 }
-                _ => {}
+                // An unrecognised timeframe used to be ignored while the API
+                // still answered "Logs deleted successfully", so a typo looked
+                // like a successful deletion that had silently done nothing.
+                other => anyhow::bail!(
+                    "Unsupported timeframe {other:?}; expected one of: 1h, 24h, 7d, all"
+                ),
             }
             conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
             Ok::<(), anyhow::Error>(())

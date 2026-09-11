@@ -908,12 +908,28 @@ pub struct ClassifyRequest {
     pub category: String, // "destination", "infrastructure", "unknown"
 }
 
+/// Record a manual domain classification.
+///
+/// Both fields are validated. Without this the endpoint accepted any string,
+/// so a malformed request could store arbitrary categories the aggregator
+/// never matches and grow the table without bound. Storage failures are now
+/// reported instead of being discarded with `let _ =`, which made a failed
+/// save indistinguishable from a successful one.
 pub async fn set_classification(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Json(payload): axum::extract::Json<ClassifyRequest>) -> Result<axum::extract::Json<()>, axum::http::StatusCode> {
-    if payload.category == "unknown" {
-        let _ = state.analytics.set_classification(&payload.domain, "unknown").await;
-    } else {
-        let _ = state.analytics.set_classification(&payload.domain, &payload.category).await;
+    let domain = config::canonical_domain(&payload.domain);
+    if !config::valid_domain(&domain) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
     }
+    // Must match the categories `aggregate_and_classify_domains` understands;
+    // "reset"/"clear" delete the override.
+    const CATEGORIES: [&str; 5] = ["destination", "infrastructure", "unknown", "reset", "clear"];
+    if !CATEGORIES.contains(&payload.category.as_str()) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    state.analytics.set_classification(&domain, &payload.category).await.map_err(|e| {
+        tracing::error!("Failed to store classification for {domain}: {e}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(axum::extract::Json(()))
 }
 

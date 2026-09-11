@@ -205,7 +205,15 @@ impl DnsProxy {
             let local = dns::local_zone(&domain);
             // Unbound owns response caching and TTL aging. Every answer must still
             // pass this client's current alias policy and relationship accounting.
-            let addr = if local { "127.0.0.1:5354" } else { &self.upstream_addr };
+            // Local-zone names go to the authoritative OpenRoot server; the
+            // address is shared with that binary so the two cannot drift.
+            let openroot_addr;
+            let addr = if local {
+                openroot_addr = config::paths::get_openroot_addr();
+                openroot_addr.as_str()
+            } else {
+                &self.upstream_addr
+            };
             // All external data, including configured forwarders, goes through validating Unbound.
             match tokio::time::timeout(Duration::from_secs(10), exchange(addr, &q, tcp)).await {
                 Ok(Ok(r)) => {
