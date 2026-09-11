@@ -123,8 +123,17 @@ impl AnalyticsDb {
         Ok(db)
     }
 
+    /// Create every table and index the daemon relies on.
+    ///
+    /// Note on locking: all `self.conn` guards in this module recover from a
+    /// poisoned mutex with `unwrap_or_else(|e| e.into_inner())`. A panic while
+    /// some other thread held the lock would otherwise poison it permanently
+    /// and turn a single failed statement into a dead analytics subsystem for
+    /// the lifetime of the process. A `rusqlite::Connection` is not left in a
+    /// torn state by a panicking caller, so resuming with it is safe; the
+    /// worst case is one lost statement.
     pub fn initialize_schema(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // WAL mode: readers do not block writers and writers do not block readers.
         // The connection mutex still serializes in-process callers; WAL helps other connections.
         conn.execute_batch("
@@ -220,7 +229,7 @@ impl AnalyticsDb {
     }
 
     pub fn load_policy_rules(&self) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT domain, action FROM policy_rules")?;
         let mut rows = stmt.query([])?;
 
@@ -240,7 +249,7 @@ impl AnalyticsDb {
     }
 
     pub fn set_policy_rule(&self, domain: &str, action: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO policy_rules (domain, action) VALUES (?1, ?2)
              ON CONFLICT(domain) DO UPDATE SET action=excluded.action",
@@ -250,7 +259,7 @@ impl AnalyticsDb {
     }
 
     pub fn remove_policy_rule(&self, domain: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM policy_rules WHERE domain = ?1", [domain])?;
         Ok(())
     }
@@ -329,22 +338,49 @@ impl AnalyticsDb {
         Ok(())
     }
 
+    /// Retention limits for the two high-volume tables.
+    const QUERY_RETENTION_DAYS: &'static str = "-30 days";
+    const MAX_QUERY_ROWS: i64 = 1_000_000;
+    const MAX_RELATIONSHIP_ROWS: i64 = 2_000_000;
+
     pub fn cleanup_old_queries(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        // Time-based TTL: drop anything older than 30 days.
-        conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-30 days')", [])?;
-        // Row-count cap: keep at most 1,000,000 rows so disk usage stays bounded on
-        // small hosts (Raspberry Pi, etc.) even on high-traffic networks.
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Time-based TTL: drop anything older than the retention window.
         conn.execute(
-            "DELETE FROM queries WHERE id < (SELECT id FROM queries ORDER BY id DESC LIMIT 1 OFFSET 999999)",
-            [],
+            "DELETE FROM queries WHERE timestamp < datetime('now', ?1)",
+            [Self::QUERY_RETENTION_DAYS],
         )?;
-        conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-30 days')", [])?;
+        // Row-count cap so disk usage stays bounded on small hosts (Raspberry
+        // Pi, etc.) even on high-traffic networks.
+        //
+        // The cut-off is computed from the current maximum id rather than with
+        // `ORDER BY id DESC LIMIT 1 OFFSET n`, which made SQLite walk n rows of
+        // the index on every run. `id` is the INTEGER PRIMARY KEY, so both the
+        // max lookup and the ranged delete use it directly.
+        Self::trim_to_row_cap(&conn, "queries", Self::MAX_QUERY_ROWS)?;
+
         conn.execute(
-            "DELETE FROM dns_relationships WHERE id < (SELECT id FROM dns_relationships ORDER BY id DESC LIMIT 1 OFFSET 1999999)",
-            [],
+            "DELETE FROM dns_relationships WHERE observed_at < datetime('now', ?1)",
+            [Self::QUERY_RETENTION_DAYS],
         )?;
+        Self::trim_to_row_cap(&conn, "dns_relationships", Self::MAX_RELATIONSHIP_ROWS)?;
+
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
+    /// Delete the oldest rows of `table` so that at most `max_rows` remain.
+    ///
+    /// `table` is a compile-time constant chosen by the caller, never user
+    /// input, so interpolating it into the statement cannot inject SQL.
+    fn trim_to_row_cap(conn: &Connection, table: &str, max_rows: i64) -> anyhow::Result<()> {
+        let highest: Option<i64> =
+            conn.query_row(&format!("SELECT MAX(id) FROM {table}"), [], |row| row.get(0))?;
+        let Some(highest) = highest else { return Ok(()) };
+        let cutoff = highest - max_rows;
+        if cutoff > 0 {
+            conn.execute(&format!("DELETE FROM {table} WHERE id <= ?1"), [cutoff])?;
+        }
         Ok(())
     }
 
@@ -526,7 +562,7 @@ impl AnalyticsDb {
     }
 
     pub fn get_domain_insights(&self, domain: &str) -> anyhow::Result<DomainInsight> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut stmt = conn.prepare("
             SELECT
@@ -591,7 +627,7 @@ impl AnalyticsDb {
         let conn = self.conn.clone();
         let timeframe = timeframe.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             match timeframe.as_str() {
                 "all" => {
                     conn.execute("DELETE FROM queries", [])?;
@@ -824,7 +860,7 @@ impl AnalyticsDb {
     // ── Custom DNS Actions Engine ─────────────────────────────────────────
 
     pub fn upsert_action(&self, domain: &str, action_type: &str, payload_url: Option<&str>, method: Option<&str>, shell_command: Option<&str>, html_content: Option<&str>, success_msg: Option<&str>, token: Option<&str>) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO custom_actions (domain, action_type, payload_url, method, shell_command, html_content, success_msg, token)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -842,13 +878,13 @@ impl AnalyticsDb {
     }
 
     pub fn delete_action(&self, domain: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM custom_actions WHERE domain = ?1", [domain])?;
         Ok(())
     }
 
     pub fn list_actions(&self) -> anyhow::Result<Vec<CustomAction>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT domain, action_type, payload_url, method, shell_command, html_content, success_msg, token FROM custom_actions ORDER BY domain")?;
         let rows = stmt.query_map([], |row| {
             Ok(CustomAction {
@@ -868,7 +904,7 @@ impl AnalyticsDb {
     }
 
     pub fn get_action(&self, domain: &str) -> Option<CustomAction> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT domain, action_type, payload_url, method, shell_command, html_content, success_msg, token FROM custom_actions WHERE domain = ?1").ok()?;
         stmt.query_row([domain], |row| {
             Ok(CustomAction {
@@ -884,11 +920,23 @@ impl AnalyticsDb {
         }).ok()
     }
 
+    /// Attach a measured latency to the most recent matching query.
+    ///
+    /// Previously this updated *every* row for the domain/client pair in the
+    /// last minute, so one slow lookup rewrote the timing of all repeated
+    /// queries. Restricting it to the newest row keeps per-query latency
+    /// accurate and lets SQLite use the `(client_ip, timestamp)` index instead
+    /// of scanning.
     pub fn log_latency(&self, domain: &str, latency_ms: u64, ip: &str) {
         if domain == "localhost" || domain.ends_with(".local") { return; }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
-            "UPDATE queries SET latency_ms = ?1 WHERE domain = ?2 AND client_ip = ?3 AND timestamp >= datetime('now', '-1 minute')",
+            "UPDATE queries SET latency_ms = ?1 WHERE id = (
+                 SELECT id FROM queries
+                 WHERE domain = ?2 AND client_ip = ?3
+                   AND timestamp >= datetime('now', '-1 minute')
+                 ORDER BY id DESC LIMIT 1
+             )",
             rusqlite::params![latency_ms as i64, domain, ip],
         );
     }
@@ -912,7 +960,7 @@ impl AnalyticsDb {
         let d = domain.to_string();
         let c = category.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             if c == "reset" || c == "clear" {
                 conn.execute("DELETE FROM domain_classifications WHERE domain = ?1", rusqlite::params![d])?;
             } else {
@@ -935,10 +983,10 @@ impl AnalyticsDb {
     }
 
     pub fn get_action_logs(&self, domain: Option<&str>, limit: u32) -> anyhow::Result<Vec<ActionLog>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let (sql, param): (String, Box<dyn rusqlite::ToSql>) = if let Some(d) = domain {
             ("SELECT id, domain, triggered_at, outcome, detail FROM action_logs WHERE domain = ?1 ORDER BY triggered_at DESC LIMIT ?2".into(),
-             Box::new(format!("{}", d)))
+             Box::new(d.to_owned()))
         } else {
             ("SELECT id, domain, triggered_at, outcome, detail FROM action_logs ORDER BY triggered_at DESC LIMIT ?1".into(),
              Box::new(limit as i64))
@@ -972,7 +1020,7 @@ impl AnalyticsDb {
     }
 
     pub fn clear_action_logs(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute("DELETE FROM action_logs", [])?;
         Ok(())
     }

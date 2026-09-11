@@ -126,11 +126,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the address this host answers with for blocked pages and actions.
+///
+/// `AEGIS_HOST_IP` wins, then the first usable `host_ips` entry from
+/// `config.json`, then loopback. The config file is located through
+/// `config::config_candidates()` so the daemon, the resolver and the
+/// container bind-mount all agree on which file is authoritative.
 fn load_host_ip()->String {
-    if let Ok(ip)=std::env::var("AEGIS_HOST_IP") {if ip.parse::<std::net::Ipv4Addr>().is_ok() {return ip;}}
-    let path=std::env::var("AEGIS_CONFIG").unwrap_or_else(|_|"config.json".into());
-    let configured=std::fs::read(path).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok());
-    configured.and_then(|v|v.get("host_ips").and_then(|v|v.as_array()).and_then(|ips|ips.iter().filter_map(|v|v.as_str()).find(|ip|ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a|!a.is_loopback())).map(str::to_owned))).unwrap_or_else(||"127.0.0.1".into())
+    // Compose passes `AEGIS_HOST_IP: ${AEGIS_HOST_IP:-}`, so an unset variable
+    // arrives as an empty string; that is "not configured", not an error.
+    match std::env::var("AEGIS_HOST_IP").unwrap_or_default().trim() {
+        "" => {}
+        // An explicit loopback override is honoured: it is a deliberate choice
+        // on single-machine installs, unlike an accidental loopback in host_ips.
+        value => match value.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if usable_host_ip(&ip) || ip.is_loopback() => return ip.to_string(),
+            _ => tracing::warn!("Ignoring AEGIS_HOST_IP={value:?}: not a usable unicast IPv4 address"),
+        },
+    }
+    let Some(config)=config::load_main_config() else {return "127.0.0.1".into()};
+    config.host_ips.iter()
+        .filter_map(|ip|ip.trim().parse::<std::net::Ipv4Addr>().ok())
+        .find(usable_host_ip)
+        .map(|ip|ip.to_string())
+        .unwrap_or_else(||{
+            tracing::warn!("config.json has no usable non-loopback host_ips entry; blocked pages will point at 127.0.0.1");
+            "127.0.0.1".into()
+        })
+}
+
+/// A host IP must be a routable unicast address; loopback, multicast,
+/// broadcast and the unspecified address cannot serve a blocked page.
+fn usable_host_ip(ip:&std::net::Ipv4Addr)->bool {
+    !ip.is_loopback()&&!ip.is_multicast()&&!ip.is_broadcast()&&!ip.is_unspecified()
 }
 async fn shutdown_signal() {
     #[cfg(unix)] {

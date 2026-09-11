@@ -134,8 +134,16 @@ class SetupTests(unittest.TestCase):
         flow = setup.Setup(parsed, self.ui, self.runner, self.backup)
         flow.requirements = lambda: None
         flow.sudo = lambda: ['sudo']
+        # Stub the dependency probe, as self.flow() does. Without it the test
+        # depended on whether a real `docker` binary happened to be installed
+        # on the machine running it: when absent, dependency() asked an extra
+        # interactive question and exhausted the scripted answers below.
+        flow.dependency = lambda *a: None
         flow.ready = lambda: None
         flow.address = lambda: '192.0.2.10'
+        # Answers to the plan confirmation and the server-address prompt.
+        # `input` is scripted rather than counted, so an unexpected extra
+        # prompt still fails the test instead of silently reading ''.
         with patch('sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=['', '']):
             flow.install()
         privileged = [(call, options) for call, options in zip(self.runner.calls, self.runner.call_options)

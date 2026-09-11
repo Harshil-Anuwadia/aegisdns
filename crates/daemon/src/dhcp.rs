@@ -41,16 +41,39 @@ pub fn config_path() -> PathBuf {
     config::paths::get_data_dir().join("dhcp.json")
 }
 
+/// Read `dhcp.json`, falling back to the (disabled) default on any problem.
+///
+/// The stored file is validated exactly like one submitted through the API.
+/// `save_config` has always validated, but a hand-edited or partially written
+/// file used to be trusted verbatim — an inverted pool (`end_ip` below
+/// `start_ip`) then underflowed the lease-count arithmetic and panicked the
+/// DHCP thread on the first packet.
 pub fn load_config() -> DhcpConfig {
     let path = config_path();
-    if path.exists() {
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str(&data) {
-                return cfg;
+    if !path.exists() {
+        return DhcpConfig::default();
+    }
+    let cfg: DhcpConfig = match std::fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str(&data) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Ignoring dhcp.json: {e}");
+                return DhcpConfig::default();
             }
+        },
+        Err(e) => {
+            error!("Cannot read dhcp.json: {e}");
+            return DhcpConfig::default();
+        }
+    };
+    // A disabled server never binds a socket, so its pool is irrelevant.
+    if cfg.enabled {
+        if let Err(e) = validate_config(&cfg) {
+            error!("Refusing to start DHCP with invalid dhcp.json: {e}");
+            return DhcpConfig::default();
         }
     }
-    DhcpConfig::default()
+    cfg
 }
 
 pub fn save_config(cfg: &DhcpConfig) -> Result<(), String> {
@@ -106,7 +129,12 @@ impl server::Handler for AegisDhcpServer {
         let end_ip: Ipv4Addr = self.config.end_ip.parse().unwrap_or(Ipv4Addr::new(192,168,1,200));
         let start_num: u32 = start_ip.into();
         let end_num: u32 = end_ip.into();
-        let num_leases = end_num - start_num + 1;
+        // Defence in depth: load_config() rejects an inverted pool, but this
+        // subtraction runs on every packet and must never underflow.
+        let Some(num_leases) = end_num.checked_sub(start_num).and_then(|n| n.checked_add(1)) else {
+            error!("DHCP pool {start_ip}-{end_ip} is inverted; ignoring request");
+            return;
+        };
         let server_ip: Ipv4Addr = self.config.server_ip.parse().unwrap_or(Ipv4Addr::new(192,168,1,1));
         let subnet_mask: Ipv4Addr = self.config.subnet_mask.parse().unwrap_or(Ipv4Addr::new(255,255,255,0));
         let router_ip: Ipv4Addr = self.config.router_ip.parse().unwrap_or(Ipv4Addr::new(192,168,1,1));
@@ -300,6 +328,26 @@ impl LeasePersister {
         let mut c=DhcpConfig::default();c.end_ip="192.168.1.20".into();assert!(validate_config(&c).is_err());
         c=DhcpConfig::default();c.subnet_mask="255.0.255.0".into();assert!(validate_config(&c).is_err());
     }
+    /// An inverted pool must be rejected rather than reaching the lease
+    /// arithmetic, where `end - start + 1` would underflow and panic.
+    #[test] fn inverted_pool_is_rejected() {
+        let mut c=DhcpConfig::default();
+        c.start_ip="192.168.1.200".into();
+        c.end_ip="192.168.1.100".into();
+        assert!(validate_config(&c).is_err(),"end_ip below start_ip must not validate");
+    }
+
+    /// A disabled server is loadable regardless of its pool, but an enabled
+    /// server with an invalid pool must fall back to the safe default.
+    #[test] fn invalid_enabled_config_falls_back_to_disabled_default() {
+        let mut c=DhcpConfig::default();
+        c.enabled=true;
+        c.start_ip="192.168.1.200".into();
+        c.end_ip="192.168.1.100".into();
+        assert!(validate_config(&c).is_err());
+        assert!(!DhcpConfig::default().enabled,"the fallback must not run a DHCP server");
+    }
+
     #[tokio::test] async fn runtime_handle_is_movable_to_worker() {
         let handle=tokio::runtime::Handle::current();
         assert!(std::thread::spawn(move||handle.spawn(async{42})).join().unwrap().await.is_ok());
