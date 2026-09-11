@@ -155,12 +155,18 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
                 .no_proxy()
                 .resolve(&host, addresses[0])
                 .build()?;
+            // Reuse the already-parsed URL rather than unwrapping the option a
+            // second time; the parse above is the single point of validation.
             let req = if action.method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("GET")) { client.get(url).query(params) }
-                else { client.post(action.payload_url.as_deref().unwrap()).json(params) };
+                else { client.post(url).json(params) };
             req.send().await?.error_for_status()?;
         }
         "html" => return Ok(action.html_content.clone().unwrap_or_default()),
-        _ => unreachable!(),
+        // validate() above rejects any other type, so this is defence in
+        // depth. Return an error rather than unreachable!(): a future action
+        // type added to validate() but not here would otherwise panic the
+        // request handler instead of reporting an unsupported action.
+        other => anyhow::bail!("Unsupported action type: {other}"),
     }
     Ok(config::html_escape(action.success_msg.as_deref().unwrap_or("Action completed")))
 }

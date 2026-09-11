@@ -720,7 +720,12 @@ impl AnalyticsDb {
                 WHERE timestamp >= datetime('now', '-60 seconds')
             ")?;
 
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            // A clock set before the epoch would panic on unwrap(); an
+            // embedded host with a dead RTC can boot in exactly that state.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
             let mut queries = vec![0; 60];
             let mut blocked = vec![0; 60];
             let mut cache = vec![0; 60];
