@@ -89,7 +89,13 @@ pub fn canonical_domain(domain: &str) -> String {
 
 pub fn valid_domain(domain: &str) -> bool {
     let d = domain.strip_prefix("*.").unwrap_or(domain);
-    !d.is_empty() && d.len() <= 253 && d.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    !d.is_empty() && d.len() <= 253 && d.split('.').all(|l| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+            && l.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
 }
 
 pub fn html_escape(value: &str) -> String {
@@ -156,6 +162,13 @@ mod security_tests {
     #[test] fn escaping_and_canonicalization() {
         assert_eq!(super::canonical_domain("WWW.Example.COM."), "www.example.com");
         assert!(!super::html_escape("<script>'&\"").contains('<'));
+    }
+    #[test] fn domain_validation_rejects_invalid_labels() {
+        assert!(super::valid_domain("example.com"));
+        assert!(super::valid_domain("*.example.com"));
+        assert!(!super::valid_domain("_service.example.com"));
+        assert!(!super::valid_domain("-bad.example.com"));
+        assert!(!super::valid_domain("bad-.example.com"));
     }
 }
 

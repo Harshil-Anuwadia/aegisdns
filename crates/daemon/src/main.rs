@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn load_host_ip()->String {
     if let Ok(ip)=std::env::var("AEGIS_HOST_IP") {if ip.parse::<std::net::Ipv4Addr>().is_ok() {return ip;}}
-    let path=std::env::var("AEGIS_CONFIG").unwrap_or_else(|_|"config.json".into());
+    let path=std::env::var("AEGIS_CONFIG").unwrap_or_else(|_|config::paths::get_data_dir().join("config.json").to_string_lossy().into_owned());
     let configured=std::fs::read(path).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok());
     configured.and_then(|v|v.get("host_ips").and_then(|v|v.as_array()).and_then(|ips|ips.iter().filter_map(|v|v.as_str()).find(|ip|ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a|!a.is_loopback())).map(str::to_owned))).unwrap_or_else(||"127.0.0.1".into())
 }
