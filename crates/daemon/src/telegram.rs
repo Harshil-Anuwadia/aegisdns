@@ -48,16 +48,49 @@ pub fn save_config(cfg: &TelegramConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Build a reqwest client that bypasses DNS for api.telegram.org.
-/// This prevents the daemon's own Telegram calls from going through our
-/// DNS proxy (which would log them as user queries and risk circular deps).
-/// IP 149.154.167.220 is Telegram's primary Bot API endpoint.
+/// Telegram's published Bot API endpoint, used as a DNS bypass.
+///
+/// Resolving `api.telegram.org` normally would send the daemon's own alert
+/// traffic back through the DNS proxy it is reporting on: the lookups would be
+/// logged as user queries, and an outage or a block rule could stop the very
+/// alerts meant to report it. Pinning the address avoids that circular
+/// dependency. It is only a *hint* — `resolve()` overrides DNS but TLS still
+/// validates the `api.telegram.org` certificate, so a stale or hijacked
+/// address cannot yield a trusted connection.
+///
+/// Override with `AEGIS_TELEGRAM_ADDR` (`host:port`) if Telegram renumbers or
+/// the deployment routes through an egress proxy.
+const TELEGRAM_API_ADDR: &str = "149.154.167.220:443";
+
+/// Build a reqwest client for Telegram API calls.
+///
+/// Built once and reused: a `reqwest::Client` owns a connection pool, and
+/// constructing a new one per request threw away every pooled TLS session.
 pub fn build_telegram_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .resolve("api.telegram.org", "149.154.167.220:443".parse().unwrap())
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let configured = std::env::var("AEGIS_TELEGRAM_ADDR").unwrap_or_default();
+        let addr = if configured.trim().is_empty() { TELEGRAM_API_ADDR } else { configured.trim() };
+
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(10));
+
+        // An unparseable address must not panic the daemon. Fall back to
+        // ordinary DNS resolution, which still works — it is just noisier.
+        match addr.parse::<std::net::SocketAddr>() {
+            Ok(socket) => builder = builder.resolve("api.telegram.org", socket),
+            Err(e) => warn!("Ignoring invalid Telegram API address {addr:?} ({e}); using DNS resolution"),
+        }
+
+        builder.build().unwrap_or_else(|e| {
+            // The configured timeouts are lost in this path, so say so rather
+            // than silently degrading to an unbounded default client.
+            warn!("Falling back to a default HTTP client for Telegram: {e}");
+            reqwest::Client::new()
+        })
+    })
+    .clone()
 }
 
 /// Non-blocking alert — spawns a tokio task so DNS is never delayed.
@@ -66,7 +99,9 @@ pub fn send_alert(cfg: Arc<RwLock<TelegramConfig>>, message: String) {
     static LAST: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = std::sync::OnceLock::new();
     let Ok(permit) = LIMIT.get_or_init(||Arc::new(tokio::sync::Semaphore::new(2))).clone().try_acquire_owned() else { return; };
     {
-        let mut last = LAST.get_or_init(||std::sync::Mutex::new(None)).lock().unwrap();
+        // Recover from poisoning: a panic elsewhere must not permanently
+        // disable alerting, and the guarded value is a single Instant.
+        let mut last = LAST.get_or_init(||std::sync::Mutex::new(None)).lock().unwrap_or_else(|e|e.into_inner());
         if last.is_some_and(|t|t.elapsed() < std::time::Duration::from_secs(5)) { return; }
         *last = Some(std::time::Instant::now());
     }
@@ -83,6 +118,19 @@ pub fn send_alert(cfg: Arc<RwLock<TelegramConfig>>, message: String) {
     });
 }
 
+/// Strip a bot token out of text before it is logged or returned to a client.
+///
+/// The token is part of the request URL, and `reqwest` includes the URL in its
+/// error messages. Those errors were being forwarded verbatim into log lines
+/// and HTTP responses, which disclosed the credential to anyone who could read
+/// either. Telegram tokens look like `<digits>:<base64-ish>`.
+fn redact_token(text: &str, token: &str) -> String {
+    if token.is_empty() {
+        return text.to_string();
+    }
+    text.replace(token, "<redacted>")
+}
+
 pub async fn send_message(cfg: &TelegramConfig, message: &str) -> Result<(), String> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", cfg.bot_token);
     let response = build_telegram_client()
@@ -94,7 +142,7 @@ pub async fn send_message(cfg: &TelegramConfig, message: &str) -> Result<(), Str
         }))
         .send()
         .await
-        .map_err(|e| format!("Failed to reach Telegram API: {e}"))?;
+        .map_err(|e| format!("Failed to reach Telegram API: {}", redact_token(&e.to_string(), &cfg.bot_token)))?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -109,7 +157,30 @@ pub async fn proxy_get_updates(token: &str) -> Result<serde_json::Value, String>
     let client = build_telegram_client();
     match client.get(&url).send().await {
         Ok(resp) => resp.json::<serde_json::Value>().await
-            .map_err(|e| format!("Failed to parse Telegram response: {}", e)),
-        Err(e) => Err(format!("Failed to reach Telegram API: {}", e)),
+            .map_err(|e| format!("Failed to parse Telegram response: {}", redact_token(&e.to_string(), token))),
+        Err(e) => Err(format!("Failed to reach Telegram API: {}", redact_token(&e.to_string(), token))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A leaked bot token lets anyone impersonate the notification bot, so it
+    /// must never survive into an error string.
+    #[test]
+    fn token_is_removed_from_error_text() {
+        let token = "123456789:AAF-ExampleTokenValueForTesting1234";
+        let error = format!("error sending request for url (https://api.telegram.org/bot{token}/sendMessage)");
+        let redacted = redact_token(&error, token);
+        assert!(!redacted.contains(token), "token must not appear: {redacted}");
+        assert!(redacted.contains("<redacted>"));
+    }
+
+    /// An unconfigured bot has an empty token; redaction must not corrupt the
+    /// message by replacing every empty substring.
+    #[test]
+    fn empty_token_leaves_text_unchanged() {
+        assert_eq!(redact_token("connection refused", ""), "connection refused");
     }
 }

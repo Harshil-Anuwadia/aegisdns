@@ -908,12 +908,28 @@ pub struct ClassifyRequest {
     pub category: String, // "destination", "infrastructure", "unknown"
 }
 
+/// Record a manual domain classification.
+///
+/// Both fields are validated. Without this the endpoint accepted any string,
+/// so a malformed request could store arbitrary categories the aggregator
+/// never matches and grow the table without bound. Storage failures are now
+/// reported instead of being discarded with `let _ =`, which made a failed
+/// save indistinguishable from a successful one.
 pub async fn set_classification(axum::extract::State(state): axum::extract::State<AppState>, axum::extract::Json(payload): axum::extract::Json<ClassifyRequest>) -> Result<axum::extract::Json<()>, axum::http::StatusCode> {
-    if payload.category == "unknown" {
-        let _ = state.analytics.set_classification(&payload.domain, "unknown").await;
-    } else {
-        let _ = state.analytics.set_classification(&payload.domain, &payload.category).await;
+    let domain = config::canonical_domain(&payload.domain);
+    if !config::valid_domain(&domain) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
     }
+    // Must match the categories `aggregate_and_classify_domains` understands;
+    // "reset"/"clear" delete the override.
+    const CATEGORIES: [&str; 5] = ["destination", "infrastructure", "unknown", "reset", "clear"];
+    if !CATEGORIES.contains(&payload.category.as_str()) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    state.analytics.set_classification(&domain, &payload.category).await.map_err(|e| {
+        tracing::error!("Failed to store classification for {domain}: {e}");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(axum::extract::Json(()))
 }
 
@@ -956,13 +972,41 @@ const FAVICON_MAX_BYTES: usize = 128 * 1024;
 
 // In-process favicon cache using only stdlib — no extra deps needed.
 // Stores (content-type, raw bytes) per domain, populated on first request.
-type FaviconEntry = (String, Vec<u8>);
+/// A cached icon: content type, bytes, and when it was stored.
+type FaviconEntry = (String, Vec<u8>, Instant);
+
+/// Cached icons expire after a day so a site that changes its favicon, or one
+/// whose lookup failed transiently, is eventually refetched. Without this the
+/// cache held whatever it first saw for the lifetime of the process.
+const FAVICON_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 static FAVICON_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>>> =
     std::sync::OnceLock::new();
 static FAVICON_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 fn favicon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>> {
     FAVICON_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Make room for a new entry once the cache is full.
+///
+/// Drops everything already expired first; only if that frees nothing does it
+/// evict the oldest entry. The previous version removed `keys().next()`, an
+/// arbitrary entry in HashMap iteration order, so a frequently requested icon
+/// was as likely to be discarded as an unused one.
+fn evict_favicon_entry(cache: &mut std::collections::HashMap<String, FaviconEntry>) {
+    let before = cache.len();
+    cache.retain(|_, (_, _, stored)| stored.elapsed() < FAVICON_TTL);
+    if cache.len() < before {
+        return;
+    }
+    if let Some(oldest) = cache
+        .iter()
+        .min_by_key(|(_, (_, _, stored))| *stored)
+        .map(|(domain, _)| domain.clone())
+    {
+        cache.remove(&oldest);
+    }
 }
 
 fn favicon_client() -> &'static reqwest::Client {
@@ -1026,14 +1070,16 @@ pub async fn get_favicon(
         return no_favicon();
     }
 
-    // Serve from cache
+    // Serve from cache, ignoring entries that have outlived their TTL.
     if let Ok(cache) = favicon_cache().lock() {
-        if let Some((ct, data)) = cache.get(&domain) {
-            return axum::response::Response::builder()
-                .header("Content-Type", ct.clone())
-                .header("Cache-Control", "public, max-age=86400")
-                .body(axum::body::Body::from(data.clone()))
-                .unwrap_or_else(|_| no_favicon());
+        if let Some((ct, data, stored)) = cache.get(&domain) {
+            if stored.elapsed() < FAVICON_TTL {
+                return axum::response::Response::builder()
+                    .header("Content-Type", ct.clone())
+                    .header("Cache-Control", "public, max-age=86400")
+                    .body(axum::body::Body::from(data.clone()))
+                    .unwrap_or_else(|_| no_favicon());
+            }
         }
     }
 
@@ -1066,11 +1112,9 @@ pub async fn get_favicon(
                 if data.len() > 64 {
                     if let Ok(mut cache) = favicon_cache().lock() {
                         if cache.len() >= FAVICON_CACHE_LIMIT && !cache.contains_key(&domain) {
-                            if let Some(key) = cache.keys().next().cloned() {
-                                cache.remove(&key);
-                            }
+                            evict_favicon_entry(&mut cache);
                         }
-                        cache.insert(domain, (content_type.to_owned(), data.clone()));
+                        cache.insert(domain, (content_type.to_owned(), data.clone(), Instant::now()));
                     }
                     return axum::response::Response::builder()
                         .header("Content-Type", content_type)
@@ -1345,6 +1389,67 @@ fn csv_cell(value:&str)->String {
     let value=if value.starts_with(['=','+','-','@','\t','\r']) {format!("'{}",value)} else {value.to_string()};
     format!("\"{}\"",value.replace('"',"\"\""))
 }
+#[cfg(test)] mod cache_tests {
+    use super::*;
+
+    /// Eviction must reclaim expired entries before touching live ones.
+    #[test]
+    fn expired_entries_are_reclaimed_first() {
+        let mut cache = std::collections::HashMap::new();
+        let stale = Instant::now() - FAVICON_TTL - std::time::Duration::from_secs(1);
+        cache.insert("stale.example".to_string(), ("image/png".to_string(), vec![1], stale));
+        cache.insert("fresh.example".to_string(), ("image/png".to_string(), vec![2], Instant::now()));
+
+        evict_favicon_entry(&mut cache);
+
+        assert!(!cache.contains_key("stale.example"), "expired entry must be dropped");
+        assert!(cache.contains_key("fresh.example"), "live entry must be kept");
+    }
+
+    /// With nothing expired, the oldest entry goes — not an arbitrary one.
+    #[test]
+    fn oldest_entry_is_evicted_when_nothing_expired() {
+        let mut cache = std::collections::HashMap::new();
+        let now = Instant::now();
+        cache.insert("old.example".to_string(),
+            ("image/png".to_string(), vec![1], now - std::time::Duration::from_secs(600)));
+        cache.insert("mid.example".to_string(),
+            ("image/png".to_string(), vec![2], now - std::time::Duration::from_secs(300)));
+        cache.insert("new.example".to_string(), ("image/png".to_string(), vec![3], now));
+
+        evict_favicon_entry(&mut cache);
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains_key("old.example"), "the oldest entry should be evicted");
+        assert!(cache.contains_key("new.example"));
+    }
+
+    /// The favicon endpoint must only accept plain DNS hostnames, so it cannot
+    /// be turned into a general-purpose request relay.
+    #[test]
+    fn favicon_domain_validation_rejects_non_hostnames() {
+        assert!(valid_favicon_domain("example.com"));
+        assert!(valid_favicon_domain("sub.example.co.uk"));
+        assert!(!valid_favicon_domain(""));
+        assert!(!valid_favicon_domain("example.com/path"));
+        assert!(!valid_favicon_domain("http://example.com"));
+        assert!(!valid_favicon_domain("example.com:8080"));
+        assert!(!valid_favicon_domain("-example.com"), "labels may not start with a hyphen");
+        assert!(!valid_favicon_domain("example..com"), "empty labels are invalid");
+        assert!(!valid_favicon_domain("exa mple.com"));
+    }
+
+    /// Only real image types may be proxied back to the dashboard.
+    #[test]
+    fn favicon_content_types_are_restricted_to_images() {
+        assert_eq!(allowed_favicon_content_type("image/png"), Some("image/png"));
+        assert_eq!(allowed_favicon_content_type("image/png; charset=binary"), Some("image/png"));
+        assert_eq!(allowed_favicon_content_type("IMAGE/PNG"), Some("image/png"));
+        assert_eq!(allowed_favicon_content_type("text/html"), None);
+        assert_eq!(allowed_favicon_content_type("application/javascript"), None);
+    }
+}
+
 #[cfg(test)] mod security_tests {
     use super::*;
     #[tokio::test]

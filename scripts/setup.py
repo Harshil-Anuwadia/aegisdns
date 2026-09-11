@@ -23,6 +23,30 @@ ROOT = Path(__file__).resolve().parent.parent
 WINDOWS = os.name == 'nt'
 CLI_LINK = Path('/usr/local/bin/aegis')
 
+# Repair /etc/resolv.conf when Tailscale has left its own resolver behind and
+# the build would otherwise have no working DNS.
+#
+# Only replaces the file when it points at Tailscale's stub (100.100.100.100)
+# or lists no usable nameserver. Anything else - a corporate resolver, a VPN,
+# a systemd-resolved symlink - is left exactly as it is. A timestamped backup
+# is kept either way so the original can always be restored by hand.
+REPAIR_RESOLV_CONF = r'''
+set -eu
+resolv=/etc/resolv.conf
+if [ -e "$resolv" ] && ! grep -qs '100\.100\.100\.100' "$resolv" && grep -qs '^[[:space:]]*nameserver' "$resolv"; then
+    exit 0   # A usable, non-Tailscale resolver is already configured.
+fi
+if [ -e "$resolv" ]; then
+    cp -a --remove-destination "$resolv" "$resolv.aegis-backup.$(date +%s)" 2>/dev/null || true
+fi
+rm -f "$resolv"
+if [ -e /run/systemd/resolve/stub-resolv.conf ]; then
+    ln -s /run/systemd/resolve/stub-resolv.conf "$resolv"
+else
+    printf 'nameserver 8.8.8.8\n' > "$resolv"
+fi
+'''
+
 
 class SetupError(Exception):
     pass
@@ -574,10 +598,20 @@ class Setup:
             prefs = self.runner.run(['tailscale', 'debug', 'prefs'], capture=True, check=False) or ''
             if '"CorpDNS": true' in prefs:
                 ts_was_true = True
-            self.sudo_run('tailscale', 'set', '--accept-dns=false', timeout=15)
-            # Tailscale often leaves its resolv.conf behind after being disabled. We must forcefully 
-            # revert it to systemd-resolved or 8.8.8.8 so Docker can reach the internet during the build.
-            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && (ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || echo "nameserver 8.8.8.8" > /etc/resolv.conf)', timeout=15)
+            # Only touch host DNS when Tailscale was actually managing it.
+            # Previously this ran whenever the tailscale binary merely existed.
+            if ts_was_true:
+                self.sudo_run('tailscale', 'set', '--accept-dns=false', timeout=15)
+                # Tailscale can leave its own resolv.conf behind after being
+                # disabled, which stops Docker reaching the internet during the
+                # build. Repair it, but never destroy a working configuration:
+                # the previous version unconditionally deleted /etc/resolv.conf
+                # with no backup, discarding a corporate or VPN resolver, and
+                # could leave the host pointed at 8.8.8.8 permanently.
+                #
+                # Keep a copy first, and only replace the file when it is
+                # actually Tailscale's (100.100.100.100) or unusable.
+                self.sudo_run('bash', '-c', REPAIR_RESOLV_CONF, timeout=15)
         self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
                         timeout=self.args.build_timeout, activity='Building container images')
         self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'],

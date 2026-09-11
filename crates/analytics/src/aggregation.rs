@@ -149,8 +149,11 @@ fn auto_is_infrastructure(hostname: &str, sld: &str) -> bool {
         "media", "deliver", "delivery", "content",
         // CDN vendor names
         "akamai", "cloudfront", "fastly", "azureedge", "cloudflare",
-        // Telemetry / tracking
-        "telemetry", "analytics", "tracking", "beacon", "metrics",
+        // Telemetry / tracking.
+        // "tracking" and "beacon" are ordinary English words that appear in
+        // real registrable names (trackingjournal.com, beaconhill.com), so
+        // they are matched as whole labels rather than SLD substrings.
+        "telemetry", "analytics", "metrics",
         "collect", "ingest", "insights",
         // Updates / patches
         "update", "updates", "download", "patch", "upgrade", "swupdate",
@@ -162,8 +165,10 @@ fn auto_is_infrastructure(hostname: &str, sld: &str) -> bool {
         "safebrowsing", "malware", "phishing",
         // Push / notifications
         "pushservice", "pushnotif", "autopush",
-        // Certificate / OCSP
-        "ocsp", "pki", "crl",
+        // NOTE: the certificate abbreviations "ocsp", "pki" and "crl" are
+        // deliberately absent. As SLD substrings they matched ordinary
+        // destinations — "napkin" and "topkick" both contain "pki", and
+        // "mycrl" contains "crl". They are matched as whole labels instead.
         // Video / streaming delivery CDN
         "googlevideo",  // structural: contains 'video' as CDN label
         // Connectivity checks
@@ -201,19 +206,36 @@ fn auto_is_infrastructure(hostname: &str, sld: &str) -> bool {
 
     // Hostname contains infra keywords as substrings anywhere
     // (catches cases where they appear mid-label like "update-server.example.com"
-    //  or "telemetry-prod.example.com")
+    //  or "telemetry-prod.example.com").
+    //
+    // Only words long and distinctive enough to be unambiguous belong here.
+    // Short abbreviations are handled below, because a bare `contains` on them
+    // hides real destinations: "crl" matches mycrl.io, and "pki" matches
+    // napkin.com and topkick.com.
     const ANYWHERE_KEYWORDS: &[&str] = &[
         // Always-infra regardless of position
-        "telemetry", "analytics", "tracking", "beacon", "crashlytics",
+        "telemetry", "analytics", "crashlytics",
         "safebrowsing", "connectivitycheck", "detectportal",
         "versioncheck", "softwareupdate", "windowsupdate",
         "normandy", "shavar", "balrog",    // Mozilla infra
-        "ocsp", "crl", "pki",             // certificate infra
-        "pagead", "doubleclick",          // ad serving infrastructure
+        "pagead", "doubleclick",           // ad serving infrastructure
     ];
     for &kw in ANYWHERE_KEYWORDS {
         if h.contains(kw) {
             return true;
+        }
+    }
+
+    // Short or common-word keywords must match a whole label, or a whole
+    // hyphen-separated word inside a label ("ocsp-responder", "crl-dp"). That
+    // still catches real certificate and telemetry infrastructure without
+    // swallowing unrelated registrable domains.
+    const WORD_KEYWORDS: &[&str] = &["ocsp", "crl", "pki", "tracking", "beacon"];
+    for label in &labels {
+        for word in label.split('-') {
+            if WORD_KEYWORDS.contains(&word) {
+                return true;
+            }
         }
     }
 
@@ -388,6 +410,46 @@ mod tests {
                 "apple.com homepage is a destination");
         assert!(!auto_is_infrastructure("whatsapp.com", "whatsapp"),
                 "whatsapp.com is a destination");
+    }
+
+    /// Short abbreviations and common English words must not match as bare
+    /// substrings. Each of these is a plausible real site that was being
+    /// hidden from Top Destinations by an over-broad keyword.
+    #[test]
+    fn common_words_do_not_trigger_infra_false_positives() {
+        for (host, sld) in [
+            ("napkin.com", "napkin"),                   // contains "pki"
+            ("topkick.com", "topkick"),                 // contains "pki"
+            ("mycrl.io", "mycrl"),                      // contains "crl"
+            ("beaconhill.com", "beaconhill"),           // contains "beacon"
+            ("trackingjournal.com", "trackingjournal"), // contains "tracking"
+        ] {
+            assert!(
+                !auto_is_infrastructure(host, sld),
+                "{host} is a real destination, not infrastructure"
+            );
+        }
+    }
+
+    /// The narrower matching must still catch genuine certificate and
+    /// telemetry infrastructure, including hyphenated service labels.
+    #[test]
+    fn certificate_and_telemetry_infra_still_detected() {
+        for (host, sld) in [
+            ("ocsp.digicert.com", "digicert"),
+            ("crl.verisign.com", "verisign"),
+            ("pki.goog", "pki"),
+            ("ocsp-responder.example.com", "example"),
+            ("crl-dp.example.net", "example"),
+            ("tracking.example.com", "example"),
+            ("beacon.example.com", "example"),
+            ("telemetry.mozilla.org", "mozilla"),
+        ] {
+            assert!(
+                auto_is_infrastructure(host, sld),
+                "{host} is infrastructure and must be classified as such"
+            );
+        }
     }
 
     #[test]

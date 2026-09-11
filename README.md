@@ -108,7 +108,7 @@ cp config.example.json config.json
 cp openroot.example.json openroot.json
 ```
 
-Set `host_ips` in `config.json` for your host. Create a `.env` file with a reachable IPv4 address assigned to that host; replace the example below:
+Set `host_ips` in `config.json` for your host — see [`config.json`](#configjson) for the full list of settings. Create a `.env` file with a reachable IPv4 address assigned to that host; replace the example below:
 
 ```dotenv
 AEGIS_HOST_IP=192.168.1.10
@@ -176,16 +176,46 @@ Removal stops this installation, restores its saved host DNS state, and removes 
 
 The default container stores persistent application data under `/var/lib/aegisdns` in the `aegisdns_data` Compose volume. The repository's `config.json`, `openroot.json`, and `blocklists/` directory are bind-mounted separately.
 
+### `config.json`
+
+Copy `config.example.json` to `config.json`. Every section is optional and any key you omit keeps its default, so a file containing only `host_ips` is valid.
+
+The daemon reads the first of these that exists:
+
+1. the path in `AEGIS_CONFIG`, if set;
+2. `config.json` in the data directory (`/var/lib/aegisdns` on Linux, `%ProgramData%\AegisDNS` on Windows);
+3. `/app/config.json`, where the supplied Compose file bind-mounts it.
+
+A file that exists but contains invalid JSON is reported on stderr and the built-in defaults are used; it is never silently ignored.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `host_ips` | `[]` | Addresses this host answers on. The first non-loopback IPv4 entry is used for blocked-page and custom-action answers. `AEGIS_HOST_IP` overrides it. |
+| `resolver.dnssec` | `true` | Validate DNSSEC signatures. Disabling it unloads Unbound's validator; responses are then unauthenticated. |
+| `resolver.qname_minimisation` | `true` | Send the minimum query name to each authoritative server, so upstream servers see less of your browsing. |
+| `resolver.ipv4` | `true` | Use IPv4 to reach upstream servers. |
+| `resolver.ipv6` | `true` | Use IPv6 to reach upstream servers. Set to `false` if your ISP has poor IPv6 peering to the root and TLD servers, which can add seconds of latency before falling back to IPv4. Disabling both families is refused; IPv4 stays on. |
+| `resolver.cache` | `true` | Cache upstream answers. Disabling it zeroes the caches and turns off prefetch, which markedly increases latency. |
+| `policy.profile` | `"balanced"` | Reserved for future filtering presets. |
+
+Changes take effect when the daemon restarts (`aegis restart`).
+
+### Environment variables
+
 | Setting | Purpose |
 | --- | --- |
+| `AEGIS_CONFIG` | Absolute path to `config.json`. Overrides the search order above. The supplied Compose file sets it to `/app/config.json`. |
 | `AEGIS_HOST_IP` | Host IPv4 address used for custom-action DNS answers and the default action listener. Set by the installer or in `.env`. |
 | `AEGIS_ADMIN_PASSWORD` | Optional admin password override, 16–256 characters. Otherwise, a generated password is persisted in the data directory. |
 | `AEGIS_FAVICON_REMOTE_LOOKUP` | Disabled by default. Set to `true` only if you accept that Google’s favicon service receives the domain names displayed in the dashboard. |
 | `TZ` | Server timezone for schedules; the supplied Compose default is `UTC`. Daily analytics and privacy budgets use UTC. |
 | `AEGIS_ACTION_EXECUTABLES` | Colon-separated absolute executable paths permitted for shell-type actions. Empty by default. |
 | `AEGIS_IP_METADATA` | Optional path to a local CIDR/ASN/country metadata file. Defaults to `ip-metadata.csv` in the data directory. |
+| `AEGIS_DNS_LISTEN` | Comma-separated DNS listen addresses. Defaults to `0.0.0.0:53,[::]:53`. |
+| `AEGIS_WEB_LISTEN` | Dashboard listen address. Defaults to `127.0.0.1:5380`; it is deliberately loopback-only. |
+| `AEGIS_TELEGRAM_ADDR` | Overrides the pinned `host:port` used to reach the Telegram Bot API. Only needed if Telegram renumbers or you route through an egress proxy. |
 
-The supplied Compose file forwards `AEGIS_HOST_IP`, `AEGIS_ADMIN_PASSWORD`, and `TZ`. To use another daemon environment setting, explicitly add it to the service's `environment` mapping in a Compose override and mount any required files. Adding a variable to `.env` alone does not pass it into the container.
+The supplied Compose file forwards `AEGIS_CONFIG`, `AEGIS_HOST_IP`, `AEGIS_ADMIN_PASSWORD`, and `TZ`. To use another daemon environment setting, explicitly add it to the service's `environment` mapping in a Compose override and mount any required files. Adding a variable to `.env` alone does not pass it into the container.
 
 ### Upstream resolution
 

@@ -21,13 +21,25 @@ pub fn iter_subdomains(domain: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+/// Contents of `config.json`.
+///
+/// Every field is optional: `#[serde(default)]` means a config that only sets
+/// `host_ips` (as shipped in `config.example.json`) still parses, and any
+/// section the user omits falls back to the documented defaults. Without this
+/// the whole file was rejected for a missing `resolver` key and every setting
+/// in it was silently ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AegisConfig {
+    /// Addresses of this host that the daemon may answer for. The first
+    /// non-loopback IPv4 entry is used for blocked-page and action responses.
+    pub host_ips: Vec<String>,
     pub resolver: ResolverConfig,
     pub policy: PolicyConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ResolverConfig {
     pub dnssec: bool,
     pub qname_minimisation: bool,
@@ -48,7 +60,8 @@ impl Default for ResolverConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PolicyConfig {
     pub profile: String,
 }
@@ -72,14 +85,139 @@ mod tests {
         assert!(config.resolver.dnssec);
         assert!(config.resolver.qname_minimisation);
     }
+
+    /// The shipped example only sets `host_ips`. It must still parse: when the
+    /// required-field version of this struct rejected it, `load_main_config`
+    /// returned None and every resolver setting silently reverted to default.
+    #[test]
+    fn host_ips_only_config_parses_with_defaults() {
+        let config: AegisConfig =
+            serde_json::from_str(r#"{"host_ips":["192.168.1.10"]}"#).expect("must parse");
+        assert_eq!(config.host_ips, vec!["192.168.1.10".to_string()]);
+        assert!(config.resolver.dnssec, "omitted sections keep their defaults");
+        assert_eq!(config.policy.profile, "balanced");
+    }
+
+    /// A partially specified section must override only the keys it names.
+    #[test]
+    fn partial_resolver_section_overrides_only_named_keys() {
+        let config: AegisConfig =
+            serde_json::from_str(r#"{"resolver":{"ipv6":false}}"#).expect("must parse");
+        assert!(!config.resolver.ipv6, "explicit value wins");
+        assert!(config.resolver.ipv4, "unnamed keys keep defaults");
+        assert!(config.resolver.cache);
+    }
+
+    /// An empty object is a valid config equivalent to all defaults.
+    #[test]
+    fn empty_config_object_is_valid() {
+        let config: AegisConfig = serde_json::from_str("{}").expect("must parse");
+        assert!(config.host_ips.is_empty());
+        assert_eq!(config.policy.profile, "balanced");
+    }
+
+    /// The file the repository ships to users must be loadable by the daemon.
+    #[test]
+    fn shipped_example_config_is_loadable() {
+        let example = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.example.json");
+        let text = std::fs::read_to_string(example).expect("config.example.json must exist");
+        let config: AegisConfig =
+            serde_json::from_str(&text).expect("config.example.json must deserialize");
+        assert!(
+            config.host_ips.iter().any(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok()),
+            "the example must show at least one valid host IP"
+        );
+    }
+
+    /// `AEGIS_CONFIG` is an absolute override and must be the only candidate.
+    #[test]
+    fn explicit_env_override_is_the_only_candidate() {
+        // Safety: single-threaded assertion on a process-global; the value is
+        // restored before returning so other tests are unaffected.
+        let previous = std::env::var_os("AEGIS_CONFIG");
+        std::env::set_var("AEGIS_CONFIG", "/tmp/aegis-test-config.json");
+        let candidates = config_candidates();
+        match previous {
+            Some(value) => std::env::set_var("AEGIS_CONFIG", value),
+            None => std::env::remove_var("AEGIS_CONFIG"),
+        }
+        assert_eq!(candidates, vec![std::path::PathBuf::from("/tmp/aegis-test-config.json")]);
+    }
+
+    #[test]
+    fn canonical_domain_normalises_case_and_root_label() {
+        assert_eq!(canonical_domain("  Example.COM.  "), "example.com");
+    }
+
+    #[test]
+    fn valid_domain_rejects_malformed_input() {
+        assert!(valid_domain("example.com"));
+        assert!(valid_domain("*.example.com"));
+        assert!(!valid_domain(""));
+        assert!(!valid_domain("exa mple.com"), "spaces are not allowed");
+        assert!(!valid_domain("example..com"), "empty labels are not allowed");
+        assert!(!valid_domain(&"a".repeat(64)), "labels cap at 63 bytes");
+    }
+
+    #[test]
+    fn html_escape_neutralises_markup() {
+        assert_eq!(
+            html_escape(r#"<script>alert("x")</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"
+        );
+    }
 }
 
-/// Load the main config.json from the data directory.
-/// Returns None if the file is missing or unparseable; callers should fall back to Default.
+/// Candidate locations for `config.json`, in priority order.
+///
+/// 1. `$AEGIS_CONFIG` — explicit override, always wins.
+/// 2. `<data dir>/config.json` — the native/package install location.
+/// 3. `/app/config.json` — where `docker-compose.yml` bind-mounts the file.
+///
+/// Before this list existed the loader only looked at (2) while the daemon's
+/// own host-IP lookup only looked at (1) with a *relative* default, so a
+/// container deployment satisfied neither and every documented setting in
+/// `config.json` was quietly ignored.
+pub fn config_candidates() -> Vec<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("AEGIS_CONFIG") {
+        return vec![std::path::PathBuf::from(explicit)];
+    }
+    let mut paths = vec![paths::get_data_dir().join("config.json")];
+    if cfg!(unix) {
+        paths.push(std::path::PathBuf::from("/app/config.json"));
+    }
+    paths
+}
+
+/// Load `config.json` from the first candidate location that exists.
+///
+/// Returns `None` only when no config file is present; callers then fall back
+/// to `Default`. A file that exists but cannot be parsed is reported loudly
+/// rather than silently ignored, because a typo previously downgraded the
+/// user's settings to defaults with no diagnostic at all.
 pub fn load_main_config() -> Option<AegisConfig> {
-    let path = paths::get_data_dir().join("config.json");
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    for path in config_candidates() {
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("aegisdns: cannot read {}: {error}", path.display());
+                }
+                continue;
+            }
+        };
+        return match serde_json::from_str::<AegisConfig>(&data) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                eprintln!(
+                    "aegisdns: {} is not valid JSON ({error}); using built-in defaults",
+                    path.display()
+                );
+                None
+            }
+        };
+    }
+    None
 }
 
 /// Canonical representation for all rule and DNS comparisons.

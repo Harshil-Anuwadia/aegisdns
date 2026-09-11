@@ -121,7 +121,13 @@ export default function Blocking() {
                     >
                       <option value="destination">Destination</option>
                       <option value="infrastructure">Infrastructure</option>
-                      <option value="unknown">Automatic / unknown</option>
+                      {/* "unknown" pins the domain to the Unclassified list;
+                          "reset" removes the manual override so automatic
+                          detection applies again. The single option that used
+                          to be labelled "Automatic / unknown" only ever did
+                          the former, leaving no way to undo a mistake. */}
+                      <option value="unknown">Unclassified</option>
+                      <option value="reset">Automatic (detect)</option>
                     </select>
                   </AsyncForm>
                 </td>
