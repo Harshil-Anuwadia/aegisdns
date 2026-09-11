@@ -42,11 +42,15 @@ impl UnboundManager {
             // Running this on every restart is wasteful and can be rate-limited.
             if !std::path::Path::new(anchor_path).exists() {
                 tracing::info!("[SECURITY] Downloading DNSSEC root trust anchor...");
-                let _ = Command::new("unbound-anchor")
+                let status = Command::new("unbound-anchor")
                     .arg("-a")
                     .arg(anchor_path)
                     .status()
                     .await;
+                match status {
+                    Ok(code) => anyhow::ensure!(code.success(), "unbound-anchor failed with status: {code}"),
+                    Err(e) => return Err(e.into()),
+                }
             }
 
             // Read resolver config to honour user's IPv6 preference.
