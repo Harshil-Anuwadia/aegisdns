@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import {
   useState,
+  useEffect,
   useId,
   cloneElement,
   isValidElement,
@@ -316,6 +317,16 @@ export function AsyncForm({
     [error, setError] = useState(""),
     [saved, setSaved] = useState(false);
   const qc = useQueryClient();
+  // "Done." is cleared when the user edits a field, but forms whose only
+  // control is the submit button (pause a schedule, release a device, send a
+  // test alert) never fire onChange, so the confirmation used to sit there
+  // permanently — and after a refetch it appeared next to a control showing
+  // the opposite state. Retire it on a timer instead.
+  useEffect(() => {
+    if (!saved) return;
+    const id = setTimeout(() => setSaved(false), 4000);
+    return () => clearTimeout(id);
+  }, [saved]);
   async function handle(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy) return;
