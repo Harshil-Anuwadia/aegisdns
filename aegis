@@ -659,9 +659,21 @@ cmd_stop() {
     restore_dns || warn "DNS restoration encountered errors"
     ok "Host DNS restoration completed"
 
-    # ── Tailscale Stop Logic Removed ──
-    # AegisDNS should not force-kill the user's Tailscale VPN connection.
-    # The VPN is a system-wide service and should remain up even if DNS stops.
+    # ── Stop Tailscale ────────────────────────────────────────
+    if command -v tailscale &>/dev/null; then
+        local ts_status
+        ts_status=$(tailscale status 2>&1 || true)
+        if echo "$ts_status" | grep -qi "stopped\|not running"; then
+            detail "Tailscale is already stopped"
+        else
+            info "Stopping Tailscale..."
+            if sudo tailscale down >/dev/null 2>&1; then
+                ok "Tailscale stopped"
+            else
+                warn "Could not stop Tailscale (may need sudo)"
+            fi
+        fi
+    fi
 
     # ── DNS Safety Net ──
     # If resolv.conf is missing or points to Tailscale (which is now stopped),
