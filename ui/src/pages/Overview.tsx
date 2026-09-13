@@ -226,7 +226,10 @@ export default function Overview() {
               Point a device at AegisDNS to see its requests.
             </Empty>
           ) : (
-            <Table headers={["Time", "Domain", "Device", "Result"]}>
+            <Table
+              label="Recent query stream"
+              headers={["Time", "Domain", "Device", "Result"]}
+            >
               {live.events.slice(0, 6).map((q, i) => (
                 <tr key={`${q.timestamp}-${q.domain}-${i}`}>
                   <td className="mono muted">{time(q.timestamp)}</td>

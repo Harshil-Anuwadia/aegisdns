@@ -119,7 +119,10 @@ export default function Actions() {
         ) : !logs.data.length ? (
           <Empty title="No executions recorded" />
         ) : (
-          <Table headers={["Timestamp", "Domain", "Result", "Message"]}>
+          <Table
+            label="Action execution history"
+            headers={["Timestamp", "Domain", "Result", "Message"]}
+          >
             {logs.data.map((l, i) => (
               <tr key={l.id || i}>
                 <td className="mono">{time(l.triggered_at)}</td>

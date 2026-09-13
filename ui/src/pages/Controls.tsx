@@ -114,7 +114,10 @@ export function Rules() {
             Add a domain rule to make an explicit allow or block decision.
           </Empty>
         ) : (
-          <Table headers={["Domain", "Decision", "Applies to", ""]}>
+          <Table
+            label="Domain rules"
+            headers={["Domain", "Decision", "Applies to", ""]}
+          >
             {rows.map((r) => (
               <tr key={`${r.domain}-${r.ip}-${r.action}`}>
                 <td className="mono">{r.domain}</td>

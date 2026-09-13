@@ -153,6 +153,7 @@ export default function Traffic() {
           <Skeleton rows={6} />
         ) : filtered.length ? (
           <Table
+            label="DNS query log"
             headers={[
               "Time",
               "Domain",

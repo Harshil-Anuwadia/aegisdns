@@ -252,7 +252,10 @@ export function Diagnostics() {
             query threshold.
           </Empty>
         ) : (
-          <Table headers={["Device", "Address", "Action"]}>
+          <Table
+            label="Quarantined devices"
+            headers={["Device", "Address", "Action"]}
+          >
             {quarantine.data.map((ip) => (
               <tr key={ip}>
                 <td>

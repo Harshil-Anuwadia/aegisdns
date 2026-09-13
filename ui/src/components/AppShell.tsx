@@ -70,7 +70,16 @@ export function AppShell({
   children: ReactNode;
 }) {
   const [mobile, setMobile] = useState(false),
-    [collapsed, setCollapsed] = useState(false),
+    // Persisted like the theme: collapsing the sidebar is a deliberate layout
+    // preference, and having it silently reset on every reload made the
+    // control feel broken.
+    [collapsed, setCollapsed] = useState(() => {
+      try {
+        return localStorage.getItem("aegis-nav-collapsed") === "1";
+      } catch {
+        return false;
+      }
+    }),
     [command, setCommand] = useState(false),
     [search, setSearch] = useState(""),
     [notifications, setNotifications] = useState(false);
@@ -90,6 +99,13 @@ export function AppShell({
       localStorage.setItem("aegis-theme", theme);
     } catch {}
   }, [theme]);
+  useEffect(() => {
+    // Storage can throw in private-browsing modes; the preference is a nicety,
+    // so a failure must never break the shell.
+    try {
+      localStorage.setItem("aegis-nav-collapsed", collapsed ? "1" : "0");
+    } catch {}
+  }, [collapsed]);
   useEffect(() => {
     setMobile(false);
     document.title = `${allPages.find((p) => p.id === route)?.label || "Overview"} · AegisDNS`;

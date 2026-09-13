@@ -90,7 +90,10 @@ export default function Blocking() {
         ) : !domains.data ? (
           <Skeleton />
         ) : (domains.data[kind as keyof Domains] || []).length ? (
-          <Table headers={["Domain", "Queries today", "Classification"]}>
+          <Table
+            label="Domain activity"
+            headers={["Domain", "Queries today", "Classification"]}
+          >
             {domains.data[kind as keyof Domains].map((d) => (
               <tr key={d.domain}>
                 <td>

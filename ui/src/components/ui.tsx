@@ -384,16 +384,21 @@ export function PageLink({
 export function Table({
   headers,
   children,
+  label,
 }: {
   headers: string[];
   children: ReactNode;
+  /** Names this scrollable region. Every table previously announced the
+   *  identical "Data table", so screen reader users landing on one of the
+   *  several regions on a page could not tell them apart. */
+  label?: string;
 }) {
   return (
     <div
       className="table-scroll"
       tabIndex={0}
       role="region"
-      aria-label="Data table"
+      aria-label={label || "Data table"}
     >
       <table>
         <thead>
