@@ -11,6 +11,9 @@ services:
       - /run
       - /tmp
     environment:
+      # Authoritative location of config.json inside the container; matches the
+      # bind mount below so daemon and resolver never disagree about the file.
+      AEGIS_CONFIG: /app/config.json
       AEGIS_HOST_IP: ${AEGIS_HOST_IP:-}
       AEGIS_ADMIN_PASSWORD: ${AEGIS_ADMIN_PASSWORD:-}
       # Disabled by default: remote favicon services learn requested domains.
@@ -18,6 +21,9 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - aegisdns_data:/var/lib/aegisdns
+      # Mounted read-only over the data volume so the daemon reads exactly the
+      # file in this directory. AEGIS_CONFIG pins the location explicitly
+      # rather than relying on the process working directory.
       - ./config.json:/app/config.json:ro,z
       - ./blocklists:/var/lib/aegisdns/blocklists:ro,z
       - ./openroot.json:/var/lib/aegisdns/openroot.json:ro,z

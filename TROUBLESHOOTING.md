@@ -78,6 +78,34 @@ dig @127.0.0.1 dnssec-failed.org A
 
 The valid query should include the `ad` flag; the deliberately broken zone should return `SERVFAIL`.
 
+## A setting in `config.json` has no effect
+
+Check the daemon log first. An unparseable file is reported and the built-in defaults are used:
+
+```bash
+docker logs aegisdns 2>&1 | grep -i 'config.json'
+```
+
+Confirm the daemon is reading the file you edited. It uses the first of these that exists: `$AEGIS_CONFIG`, then `config.json` in the data directory, then `/app/config.json`. The supplied Compose file sets `AEGIS_CONFIG=/app/config.json` and bind-mounts the repository copy there:
+
+```bash
+docker exec aegisdns sh -c 'echo "$AEGIS_CONFIG"; cat "$AEGIS_CONFIG"'
+```
+
+Settings are read at startup, so restart after editing:
+
+```bash
+aegis restart
+```
+
+Every section is optional and unknown keys are ignored, so a typo in a key name silently leaves the default in place. Compare against the table in the README.
+
+Verify that the resolver settings were applied by inspecting the generated Unbound configuration:
+
+```bash
+docker exec aegisdns grep -E 'do-ip4|do-ip6|qname-minimisation|module-config' /run/aegisdns/unbound.conf
+```
+
 ## A client is temporarily rate-limited
 
 The guard activates after 12,000 DNS queries from one client in 60 seconds and releases automatically after 60 seconds. It applies to LAN, Tailscale, and loopback clients. Use the dashboard quarantine view to release it sooner. This mechanism only blocks DNS responses; it does not isolate other traffic.

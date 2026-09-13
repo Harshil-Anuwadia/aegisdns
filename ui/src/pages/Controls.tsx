@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Clock3, ListFilter, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Clock3, ListFilter, Plus, Trash2 } from "lucide-react";
 import { number, send, useApi } from "../api";
 import type { Blocklist, Device, Policy, Schedule } from "../types";
 import {
@@ -64,8 +64,10 @@ export function Rules() {
           domains.map((domain) => ({ domain, action: "Blocked", ip })),
         ),
       ].filter(
+        // Both sides are lowercased: a stored rule may be capitalised, and
+        // lowercasing only the search term made those rules unfindable.
         (r) =>
-          r.domain.includes(search.toLowerCase()) &&
+          r.domain.toLowerCase().includes(search.trim().toLowerCase()) &&
           (scope === "all" || (scope === "global" ? !r.ip : !!r.ip)),
       )
     : [];
@@ -99,7 +101,9 @@ export function Rules() {
             <option value="global">Network rules</option>
             <option value="device">Device rules</option>
           </select>
-          <span className="filter-count">{rows.length} rules</span>
+          <span className="filter-count">
+            {rows.length === 1 ? "1 rule" : `${rows.length} rules`}
+          </span>
         </div>
         {query.error ? (
           <ErrorState error={query.error} retry={() => void query.refetch()} />
@@ -110,7 +114,10 @@ export function Rules() {
             Add a domain rule to make an explicit allow or block decision.
           </Empty>
         ) : (
-          <Table headers={["Domain", "Decision", "Applies to", ""]}>
+          <Table
+            label="Domain rules"
+            headers={["Domain", "Decision", "Applies to", ""]}
+          >
             {rows.map((r) => (
               <tr key={`${r.domain}-${r.ip}-${r.action}`}>
                 <td className="mono">{r.domain}</td>
@@ -410,7 +417,11 @@ export function Schedules() {
                   }
                 >
                   <Trash2 size={16} />
-                  <span className="sr-only">Delete schedule {s.label}</span>
+                  {/* label is optional, so fall back to the domain to keep the
+                      accessible name unique between schedules. */}
+                  <span className="sr-only">
+                    Delete schedule {s.label || s.domain}
+                  </span>
                 </ConfirmButton>
               </div>
             </Panel>

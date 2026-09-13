@@ -68,35 +68,101 @@ const PROTECTED_BRANDS: &[&str] = &[
     "sbi", "axis",
 ];
 
+/// Names that sit one ordinary edit from a protected brand but are ordinary
+/// English or industry words. Without this list `finance.com` is reported as
+/// impersonating "binance", `stream.com` as "steam", and `case.com` as
+/// "chase".
+const COMMON_WORDS: &[&str] = &[
+    "stream", "steem", "team", "phase", "chose", "chas", "case", "cases",
+    "ample", "amble", "maple", "finance", "credit", "oasis", "basis",
+    "reddi", "media", "medias",
+];
+
+/// Character pairs that look alike in a browser address bar. Substituting one
+/// for another is the classic typosquatting trick ("g00gle", "paypa1"), as
+/// opposed to an ordinary spelling difference between two unrelated words.
+const CONFUSABLE_GROUPS: &[&str] = &[
+    "il1", "o0", "s5", "g9q", "b6", "z2", "a4", "e3", "t7", "uv", "mn", "cek", "rn",
+];
+
+fn confusable(a: char, b: char) -> bool {
+    CONFUSABLE_GROUPS
+        .iter()
+        .any(|group| group.contains(a) && group.contains(b))
+}
+
+/// Report brand impersonation only for edits that plausibly deceive a reader.
+///
+/// A bare Levenshtein distance of 1 was far too loose: it scored `finance.com`,
+/// `stream.com`, `team.com`, `case.com` and `phase.com` as +60 "brand
+/// impersonation", and short brands like "sbi" made `ski`, `sci` and `sbs`
+/// look malicious too. An edit now qualifies when it is
+///   * an insertion or deletion (doubled or dropped letter: "gogle",
+///     "faceboook"), or
+///   * a substitution between visually confusable characters ("g00gle",
+///     "paypa1", "twltter"),
+/// and both names are long enough for the comparison to mean anything.
+fn brand_impersonation(candidate: &str, brand: &str) -> Option<String> {
+    const MIN_LEN: usize = 5;
+    if candidate == brand
+        || brand.len() < MIN_LEN
+        || candidate.len() < MIN_LEN
+        || COMMON_WORDS.contains(&candidate)
+    {
+        return None;
+    }
+    if levenshtein(candidate, brand) != 1 {
+        return None;
+    }
+    let deceptive = if candidate.len() == brand.len() {
+        // Exactly one differing position, by definition of distance 1.
+        candidate
+            .chars()
+            .zip(brand.chars())
+            .find(|(a, b)| a != b)
+            .is_some_and(|(a, b)| confusable(a, b))
+    } else {
+        // An inserted or deleted character: "gogle", "faceboook", "amazonn".
+        true
+    };
+    deceptive.then(|| {
+        format!("Possible brand impersonation: '{candidate}' looks like '{brand}'")
+    })
+}
+
 const NRD_TLDS: &[&str] = &[
     "xyz", "top", "online", "site", "store", "space", "live", "fun", "click", "world", "vip", "cc", "pw", "tk", "ml", "ga", "cf", "gq", "io", "co"
 ];
 
+/// Levenshtein edit distance.
+///
+/// Uses a single row of working state instead of a full `Vec<Vec<usize>>`
+/// matrix. This is called once per protected brand for every scored domain,
+/// so the old version allocated dozens of nested vectors per lookup.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
-    let len_a = a_chars.len();
-    let len_b = b_chars.len();
-    
+    let (len_a, len_b) = (a_chars.len(), b_chars.len());
+
     if len_a == 0 { return len_b; }
     if len_b == 0 { return len_a; }
-    
-    let mut dp = vec![vec![0; len_b + 1]; len_a + 1];
-    
-    for i in 0..=len_a { dp[i][0] = i; }
-    for j in 0..=len_b { dp[0][j] = j; }
-    
+
+    let mut previous: Vec<usize> = (0..=len_b).collect();
     for i in 1..=len_a {
+        // `diagonal` holds previous[j - 1] from before it was overwritten.
+        let mut diagonal = previous[0];
+        previous[0] = i;
         for j in 1..=len_b {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
-            dp[i][j] = std::cmp::min(
-                std::cmp::min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
-                dp[i - 1][j - 1] + cost
+            let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
+            let current = std::cmp::min(
+                std::cmp::min(previous[j] + 1, previous[j - 1] + 1),
+                diagonal + cost,
             );
+            diagonal = previous[j];
+            previous[j] = current;
         }
     }
-    
-    dp[len_a][len_b]
+    previous[len_b]
 }
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -386,9 +452,9 @@ pub fn score_domain(domain: &str) -> RiskScore {
     }
     
     for &brand in PROTECTED_BRANDS {
-        if base_sld != brand && levenshtein(&base_sld, brand) == 1 {
+        if let Some(reason) = brand_impersonation(&base_sld, brand) {
             score += 60;
-            factors.push(format!("Possible brand impersonation: '{}' looks like '{}'", base_sld, brand));
+            factors.push(reason);
             break;
         }
     }
@@ -442,6 +508,69 @@ mod tests {
     fn phishing_keyword() {
         let r = score_domain("secure-login-verify.tk");
         assert!(r.score >= 60, "Phishing domain should score high, got {}", r.score);
+    }
+
+    /// Ordinary words one edit from a brand must not be accused of
+    /// impersonation. Each of these previously scored +60.
+    #[test]
+    fn ordinary_words_are_not_brand_impersonation() {
+        for domain in [
+            "finance.com", "stream.com", "case.com", "phase.com",
+            "ample.com", "credit.com", "oasis.com",
+        ] {
+            let r = score_domain(domain);
+            assert!(
+                !r.factors.iter().any(|f| f.contains("impersonation")),
+                "{domain} must not be flagged as brand impersonation: {:?}",
+                r.factors
+            );
+        }
+    }
+
+    /// Short brands cannot support a one-edit comparison at all: "ski" and
+    /// "sbs" are each one edit from "sbi".
+    #[test]
+    fn short_names_are_not_compared_to_short_brands() {
+        for domain in ["ski.com", "sbs.com", "sci.com", "axi.com"] {
+            let r = score_domain(domain);
+            assert!(
+                !r.factors.iter().any(|f| f.contains("impersonation")),
+                "{domain} must not be flagged: {:?}",
+                r.factors
+            );
+        }
+    }
+
+    /// Genuine typosquats must still be caught: doubled or dropped letters,
+    /// and digit-for-letter swaps that look alike in an address bar.
+    #[test]
+    fn deceptive_lookalikes_are_still_flagged() {
+        // Note: "g00gle" substitutes two characters, so it is edit distance 2
+        // and is caught by the other heuristics rather than this one.
+        for domain in [
+            "gogle.com",     // dropped letter
+            "faceboook.com", // doubled letter
+            "paypa1.com",    // 1 for l
+            "amaz0n.com",    // 0 for o
+            "twltter.com",   // l for i
+            "disc0rd.com",   // 0 for o
+        ] {
+            let r = score_domain(domain);
+            assert!(
+                r.factors.iter().any(|f| f.contains("impersonation")),
+                "{domain} should be flagged as impersonation: {:?}",
+                r.factors
+            );
+        }
+    }
+
+    #[test]
+    fn levenshtein_matches_known_distances() {
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("google", "gogle"), 1);
+        assert_eq!(levenshtein("google", "google"), 0);
     }
 
     #[test]

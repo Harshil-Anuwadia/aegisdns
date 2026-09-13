@@ -1029,6 +1029,12 @@ tbody tr:hover {
 .command-results button span {
   flex: 1;
 }
+.command-empty {
+  padding: 12px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
 .command-hint {
   display: flex;
   align-items: center;

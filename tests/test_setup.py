@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import signal
 import select
 import time
@@ -134,8 +135,16 @@ class SetupTests(unittest.TestCase):
         flow = setup.Setup(parsed, self.ui, self.runner, self.backup)
         flow.requirements = lambda: None
         flow.sudo = lambda: ['sudo']
+        # Stub the dependency probe, as self.flow() does. Without it the test
+        # depended on whether a real `docker` binary happened to be installed
+        # on the machine running it: when absent, dependency() asked an extra
+        # interactive question and exhausted the scripted answers below.
+        flow.dependency = lambda *a: None
         flow.ready = lambda: None
         flow.address = lambda: '192.0.2.10'
+        # Answers to the plan confirmation and the server-address prompt.
+        # `input` is scripted rather than counted, so an unexpected extra
+        # prompt still fails the test instead of silently reading ''.
         with patch('sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=['', '']):
             flow.install()
         privileged = [(call, options) for call, options in zip(self.runner.calls, self.runner.call_options)
@@ -326,6 +335,51 @@ class Arguments(unittest.TestCase):
     def test_noninteractive_requires_yes(self):
         with patch('sys.stdin.isatty',return_value=False),contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup.main(['install','--plain']),1)
+
+
+class ResolvConfRepair(unittest.TestCase):
+    """The Tailscale DNS repair must never discard a working resolver."""
+
+    def repair(self, initial=None, stub=False):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        resolv = Path(directory) / 'resolv.conf'
+        stub_path = Path(directory) / 'stub'
+        if initial is not None:
+            resolv.write_text(initial)
+        if stub:
+            stub_path.write_text('nameserver 127.0.0.53\n')
+        script = (setup.REPAIR_RESOLV_CONF
+                  .replace('/etc/resolv.conf', str(resolv))
+                  .replace('/run/systemd/resolve/stub-resolv.conf', str(stub_path)))
+        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backups = list(Path(directory).glob('resolv.conf.aegis-backup.*'))
+        return (resolv.read_text() if resolv.exists() else None), resolv, backups
+
+    def test_working_resolver_is_never_replaced(self):
+        original = 'nameserver 10.0.0.53\nsearch corp.example\n'
+        content, _, backups = self.repair(original)
+        self.assertEqual(content, original, 'a corporate or VPN resolver must be left alone')
+        self.assertFalse(backups, 'nothing was changed, so no backup is needed')
+
+    def test_tailscale_resolver_is_replaced_and_backed_up(self):
+        content, _, backups = self.repair('nameserver 100.100.100.100\n')
+        self.assertNotIn('100.100.100.100', content)
+        self.assertEqual(len(backups), 1, 'the original must be recoverable')
+        self.assertIn('100.100.100.100', backups[0].read_text())
+
+    def test_unusable_file_is_replaced(self):
+        content, _, _ = self.repair('# no nameserver here\n')
+        self.assertIn('nameserver', content)
+
+    def test_systemd_stub_is_preferred_when_present(self):
+        _, resolv, _ = self.repair('nameserver 100.100.100.100\n', stub=True)
+        self.assertTrue(resolv.is_symlink(), 'should link to the systemd-resolved stub')
+
+    def test_missing_file_is_created(self):
+        content, _, _ = self.repair(None)
+        self.assertIn('nameserver', content)
 
 
 class ShellRecovery(unittest.TestCase):

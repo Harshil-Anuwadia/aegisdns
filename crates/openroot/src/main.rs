@@ -24,7 +24,20 @@ impl OpenRootServer {
     pub async fn load_zones(&self)->Result<()> {
         match tokio::fs::read(&self.config_path).await {
             Ok(bytes)=>{*self.zone.write().await=OpenRootZone::parse(&bytes)?;}
-            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{config::atomic_write(&self.config_path,b"{\"a_records\":{}}")?;}
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{
+                // Seed an empty zone file when the filesystem allows it, but
+                // never treat failure as fatal. The supplied Compose service
+                // runs read_only with openroot.json mounted :ro, so a missing
+                // file previously stopped the server from starting at all.
+                // An empty in-memory zone is a valid state: every local-zone
+                // query simply answers NXDOMAIN.
+                if let Err(write_error)=config::atomic_write(&self.config_path,b"{\"a_records\":{}}") {
+                    tracing::warn!(
+                        "Serving an empty local zone: {} is missing and could not be created ({write_error})",
+                        self.config_path.display()
+                    );
+                }
+            }
             Err(e)=>return Err(e.into()),
         }
         Ok(())
@@ -107,7 +120,7 @@ impl OpenRootServer {
 #[tokio::main]
 async fn main()->Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    OpenRootServer::new().start("127.0.0.1:5354").await
+    OpenRootServer::new().start(&config::paths::get_openroot_addr()).await
 }
 #[cfg(test)] mod tests {
     use super::*;
