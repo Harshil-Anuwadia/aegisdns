@@ -5,14 +5,12 @@ import {
   Radio,
   Server,
   Shield,
-  Trash2,
   RefreshCw,
 } from "lucide-react";
-import { api, send, useApi } from "../api";
+import { send, useApi } from "../api";
 import type {
   Device,
   Dhcp,
-  Result,
   Telegram,
   Upstream as UpstreamData,
 } from "../types";

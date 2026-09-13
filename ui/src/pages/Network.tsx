@@ -10,14 +10,20 @@ import {
   type Node as FlowNode,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Globe2, Expand, Shrink, Monitor, Network as NetworkIcon, Shield } from "lucide-react";
+import {
+  Globe2,
+  Expand,
+  Shrink,
+  Monitor,
+  Network as NetworkIcon,
+  Shield,
+} from "lucide-react";
 import { number, useApi } from "../api";
 import type { Graph, GraphNode } from "../types";
 import {
   Button,
   Empty,
   ErrorState,
-  Field,
   PageHeader,
   Panel,
   Skeleton,
@@ -131,7 +137,7 @@ export default function Network() {
     for (const { column } of nodeCols) {
       columns.set(column, (columns.get(column) || 0) + 1);
     }
-    
+
     let currentX = 0;
     const columnOffsets = new Map<number, number>();
     for (let c = 0; c <= 4; c++) {
@@ -149,7 +155,10 @@ export default function Network() {
       return {
         id: n.id,
         type: "relationship",
-        position: { x: (columnOffsets.get(column) || 0) + lane * 280, y: (row % 15) * 85 },
+        position: {
+          x: (columnOffsets.get(column) || 0) + lane * 280,
+          y: (row % 15) * 85,
+        },
         data: {
           label: n.label,
           kind: n.kind,
@@ -311,17 +320,36 @@ export default function Network() {
               >
                 <Background color="var(--border)" gap={22} size={1} />
                 <Controls showInteractive={false}>
-                  <ControlButton 
+                  <ControlButton
                     onClick={(e) => {
-                      if (document.fullscreenElement) {
-                        document.exitFullscreen();
-                      } else {
-                        (e.target as HTMLElement).closest('.react-flow')?.requestFullscreen();
-                      }
-                    }} 
-                    title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                      // Both Fullscreen API calls return a promise that
+                      // rejects when the browser refuses the request (an
+                      // iframe without allowfullscreen, or a gesture the
+                      // browser does not consider user-activated). Unhandled,
+                      // that surfaced as an uncaught error in the console.
+                      // currentTarget is the button itself; target can be the
+                      // inner SVG path.
+                      const target = e.currentTarget.closest(".react-flow");
+                      void (
+                        document.fullscreenElement
+                          ? document.exitFullscreen()
+                          : (target?.requestFullscreen() ?? Promise.resolve())
+                      ).catch(() => {
+                        /* Fullscreen is a convenience; the graph stays usable inline. */
+                      });
+                    }}
+                    aria-label={
+                      isFullscreen
+                        ? "Exit full screen graph"
+                        : "View graph full screen"
+                    }
+                    title={isFullscreen ? "Exit full screen" : "Full screen"}
                   >
-                    {isFullscreen ? <Shrink size={14} strokeWidth={2.5} /> : <Expand size={14} strokeWidth={2.5} />}
+                    {isFullscreen ? (
+                      <Shrink size={14} strokeWidth={2.5} />
+                    ) : (
+                      <Expand size={14} strokeWidth={2.5} />
+                    )}
                   </ControlButton>
                 </Controls>
               </ReactFlow>
@@ -397,7 +425,8 @@ export default function Network() {
         Recorded DNS observations, not proof of ownership or application
         identity. Showing {number(query.data?.edges.length)} highest-activity
         connections from up to {number(query.data?.observation_limit || 100000)}
-        recent observations{query.data?.truncated ? "; more connections match this view" : ""}.
+        recent observations
+        {query.data?.truncated ? "; more connections match this view" : ""}.
         Search for a domain or raise the activity threshold to investigate dense
         networks. ASN and country data require a local enrichment file.
       </p>

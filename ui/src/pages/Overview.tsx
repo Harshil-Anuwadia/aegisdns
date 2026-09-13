@@ -5,7 +5,6 @@ import {
   Globe2,
   Monitor,
   ShieldCheck,
-  Waypoints,
 } from "lucide-react";
 import { number, rate, time, timestamp, useApi } from "../api";
 import type {

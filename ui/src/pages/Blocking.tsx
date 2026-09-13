@@ -1,13 +1,11 @@
 import { useState } from "react";
-import { ShieldCheck, ShieldOff } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { number, send, useApi } from "../api";
 import type { DomainCount, Domains, Stats } from "../types";
 import {
   AsyncForm,
-  Badge,
   Empty,
   ErrorState,
-  Field,
   PageHeader,
   Panel,
   Skeleton,
@@ -96,7 +94,10 @@ export default function Blocking() {
             {domains.data[kind as keyof Domains].map((d) => (
               <tr key={d.domain}>
                 <td>
-                  <a className="domain-link" href={`#network?domain=${encodeURIComponent(d.domain)}`}>
+                  <a
+                    className="domain-link"
+                    href={`#network?domain=${encodeURIComponent(d.domain)}`}
+                  >
                     <DomainIcon domain={d.domain} size="compact" />
                     {d.domain}
                   </a>

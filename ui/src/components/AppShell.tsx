@@ -3,7 +3,6 @@ import {
   Bell,
   ChevronLeft,
   Command,
-  FileText,
   Globe2,
   LayoutDashboard,
   ListFilter,
@@ -19,7 +18,6 @@ import {
   Terminal,
   Timer,
   Workflow,
-  X,
   Monitor,
   RefreshCw,
   ArrowUpRight,
@@ -113,7 +111,10 @@ export function AppShell({
   }
   const nav = (
     <>
-      <a href="#overview" className="brand">
+      {/* The wordmark is hidden by CSS when the sidebar is collapsed, which
+          would leave this link with no accessible name. The explicit label
+          keeps it announced in both states. */}
+      <a href="#overview" className="brand" aria-label="AegisDNS — Overview">
         <span className="brand-mark">
           <Shield size={24} strokeWidth={1.6} />
         </span>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Code2, Plus, Trash2, Workflow } from "lucide-react";
+import { Plus, Trash2, Workflow } from "lucide-react";
 import { send, time, useApi } from "../api";
 import type { Action, ActionLog } from "../types";
 import {

@@ -117,7 +117,12 @@ export default function Traffic() {
           <select
             aria-label="Sort queries"
             value={sort}
-            onChange={(e) => setSort(e.target.value)}
+            onChange={(e) => {
+              setSort(e.target.value);
+              // Re-ordering changes which rows are on a page, so returning to
+              // the first page keeps the newly sorted results in view.
+              setPage(0);
+            }}
           >
             <option value="newest">Newest first</option>
             <option value="oldest">Oldest first</option>
@@ -312,17 +317,29 @@ export default function Traffic() {
               status,
               ip: device,
             });
+            // A binary download cannot go through api(), which assumes JSON.
+            // It still needs the same credentials, guard header and a timeout,
+            // otherwise a stalled export hangs the dialog indefinitely.
             const response = await fetch(`/api/export/logs?${q}`, {
               credentials: "same-origin",
               headers: { "X-Aegis-Request": "1" },
+              signal: AbortSignal.timeout(120000),
             });
             if (!response.ok)
-              throw new Error(`Export failed (${response.status})`);
+              throw new Error(
+                response.status === 401
+                  ? "Your admin session needs authentication. Reload to sign in."
+                  : `Export failed (${response.status}). Check the service and try again.`,
+              );
             const url = URL.createObjectURL(await response.blob());
             const a = document.createElement("a");
             a.href = url;
             a.download = `aegisdns-queries.${d.get("format")}`;
+            // Firefox only honours a programmatic click on a connected anchor.
+            a.style.display = "none";
+            document.body.append(a);
             a.click();
+            a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
             setExportOpen(false);
           }}
@@ -341,8 +358,9 @@ export default function Traffic() {
             </select>
           </Field>
           <p className="note">
-            Current device and status filters apply. Availability depends on
-            retained logs.
+            The current device and status filters apply. The domain search box
+            filters only this session's live view, so it is not part of the
+            export. Availability depends on retained logs.
           </p>
         </AsyncForm>
       </Dialog>

@@ -23,10 +23,11 @@ export default function Devices() {
     live = useLive();
   const [open, setOpen] = useState(false),
     [search, setSearch] = useState("");
-  const devices =
-    query.data?.filter((d) =>
-      `${d.name} ${d.ip}`.toLowerCase().includes(search.toLowerCase()),
-    ) || [];
+  const all = query.data || [];
+  const term = search.trim().toLowerCase();
+  const devices = term
+    ? all.filter((d) => `${d.name} ${d.ip}`.toLowerCase().includes(term))
+    : all;
   return (
     <>
       <PageHeader
@@ -50,8 +51,12 @@ export default function Devices() {
             placeholder="Search by name or IP address…"
           />
         </div>
+        {/* While searching, the count describes the filtered view rather than
+            claiming every match is the full registration list. */}
         <span className="filter-count">
-          {devices.length} registered devices
+          {term
+            ? `${devices.length} of ${all.length} devices`
+            : `${all.length} registered ${all.length === 1 ? "device" : "devices"}`}
         </span>
       </div>
       {query.error ? (
