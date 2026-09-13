@@ -98,16 +98,29 @@ export function AppShell({
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setCommand((v) => !v);
+        setCommand((v) => {
+          // Toggling shut counts as closing, so drop the stale query too.
+          if (v) setSearch("");
+          return !v;
+        });
       }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, []);
-  function go(id: string) {
-    location.hash = id;
+  // Every exit from the palette clears the query. Previously only go() did,
+  // so dismissing with Escape or the overlay and reopening showed the palette
+  // still filtered by the last search with no obvious way to tell why.
+  const matchingPages = allPages.filter((p) =>
+    p.label.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+  function closeCommand() {
     setCommand(false);
     setSearch("");
+  }
+  function go(id: string) {
+    location.hash = id;
+    closeCommand();
   }
   const nav = (
     <>
@@ -251,7 +264,7 @@ export function AppShell({
       </div>
       <Dialog
         open={command}
-        onClose={() => setCommand(false)}
+        onClose={closeCommand}
         title="Command center"
         description="Navigate your network workspace."
       >
@@ -288,15 +301,21 @@ export function AppShell({
             ]?.focus();
           }}
         >
-          {allPages
-            .filter((p) => p.label.toLowerCase().includes(search.toLowerCase()))
-            .map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => go(id)}>
-                <Icon size={18} />
-                <span>Open {label}</span>
-                <ArrowUpRight size={15} />
-              </button>
-            ))}
+          {matchingPages.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => go(id)}>
+              <Icon size={18} />
+              <span>Open {label}</span>
+              <ArrowUpRight size={15} />
+            </button>
+          ))}
+          {/* Without this the list silently collapses to the three always-on
+              commands, which reads as if the search box were broken. */}
+          {!matchingPages.length && !search.includes(".") && (
+            <p className="command-empty" role="status">
+              No pages match “{search.trim()}”. Enter a domain to investigate
+              it, or use a command below.
+            </p>
+          )}
           {search.includes(".") && (
             <button
               onClick={() =>
@@ -311,7 +330,7 @@ export function AppShell({
           <button
             onClick={() => {
               toggleTheme();
-              setCommand(false);
+              closeCommand();
             }}
           >
             <Sun size={18} />
@@ -320,7 +339,7 @@ export function AppShell({
           <button
             onClick={() => {
               void qc.invalidateQueries();
-              setCommand(false);
+              closeCommand();
             }}
           >
             <RefreshCw size={18} />
