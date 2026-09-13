@@ -698,6 +698,20 @@ cmd_restart() {
     if is_running; then
         cd "$AEGIS_DIR"
 
+        # Ensure Tailscale is running if installed
+        if command -v tailscale &>/dev/null; then
+            local ts_status
+            ts_status=$(tailscale status 2>&1 || true)
+            if echo "$ts_status" | grep -qi "stopped\|not running"; then
+                info "Starting Tailscale..."
+                sudo tailscale up >/dev/null 2>&1 || true
+                ok "Tailscale started"
+            elif echo "$ts_status" | grep -qi "logged out\|NeedsLogin\|not logged in"; then
+                info "Tailscale requires authentication to connect..."
+                sudo tailscale up || warn "Tailscale is not logged in"
+            fi
+        fi
+
         # Refresh IP and config before restart
         local ip
         ip=$(detect_ip)
