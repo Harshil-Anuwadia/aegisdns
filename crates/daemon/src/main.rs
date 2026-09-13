@@ -95,10 +95,25 @@ async fn main() -> anyhow::Result<()> {
     }
     let action_db=analytics.clone();
     let action_host_ip=host_ip.clone();
-    services.spawn(async move {loop {
-        if let Err(e)=web::start_action_server(action_db.clone(),&action_host_ip).await {tracing::error!("Action API failed: {}",e);}
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }});
+    services.spawn(async move {
+        let mut last_error = String::new();
+        loop {
+            if let Err(e) = web::start_action_server(action_db.clone(), &action_host_ip).await {
+                let err_str = e.to_string();
+                if err_str != last_error {
+                    if err_str.contains("os error 99") {
+                        tracing::warn!("Action API waiting for IP {} to become available...", action_host_ip);
+                    } else {
+                        tracing::error!("Action API failed: {}", err_str);
+                    }
+                    last_error = err_str;
+                }
+            } else {
+                last_error.clear();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
     let web_db=analytics.clone();
     let dhcp_devices=devices.clone();
     let web_restart=restart.clone();
