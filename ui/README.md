@@ -20,6 +20,17 @@ npm test
 
 Browser tests launch the compiled application, apply the daemon's Content Security Policy, and intercept API requests using fixtures in `tests/fixtures.ts`. They never change a running DNS installation. Screenshots and failure traces are written to `test-results/`. These tests verify UI behavior and request contracts; Rust tests cover server behavior. Real resolver, DHCP, and Telegram operation still depends on the host's configuration.
 
+Every route is checked in both themes and at two viewports (`desktop` 1440×1000 and `mobile` 390×844) for a visible heading, no leftover loading state, no error alert, no horizontal overflow, no uncaught page errors, and zero `axe-core` violations against the `wcag2a`, `wcag2aa` and `wcag21aa` rule sets. `npx playwright install chromium` needs network access; without a browser binary `npx playwright test --list` still reports the suite, but running it requires the download.
+
+## Formatting
+
+Prettier is the only style tool in the repository; there is no ESLint configuration. Check or apply it before committing:
+
+```sh
+npx prettier --check "src/**/*.{ts,tsx,css}"
+npx prettier --write "src/**/*.{ts,tsx,css}"
+```
+
 ## Source layout
 
 - `src/components`: shell, navigation, accessible dialogs/forms, tables and chart.
@@ -31,3 +42,16 @@ Browser tests launch the compiled application, apply the daemon's Content Securi
 The query log starts with the latest 50 persisted events and retains up to 500 events in the current session. Older history is available through export. The traffic chart uses the API's 60-second window. Device activity reflects DNS observations, not online presence. Privacy scores are DNS exposure estimates, and relationship nodes describe observations rather than verified ownership. The UI does not invent historical trends, resolver health, application identity or per-query fields absent from the API.
 
 Both themes support keyboard navigation, visible focus, descriptive status labels and reduced motion. Use Ctrl/Command+K for page commands and domain investigation. Arrow keys navigate command results; Escape closes dialogs. Destructive operations require an explicit confirmation.
+
+## Browser state
+
+Two preferences are stored in `localStorage`, each written through a `try`/`catch` so that private-browsing modes cannot break the shell. Nothing else is persisted client-side, and no query history leaves the browser.
+
+| Key                   | Values                    | Meaning                                              |
+| --------------------- | ------------------------- | ---------------------------------------------------- |
+| `aegis-theme`         | `dark` (default), `light` | Applied to `document.documentElement.dataset.theme`. |
+| `aegis-nav-collapsed` | `1`, `0` (default)        | Whether the desktop sidebar is collapsed to icons.   |
+
+## Timestamps
+
+The daemon stores naive UTC timestamps (`2026-09-10 14:32:01`). `timestamp()` in `src/api.ts` treats a value with no timezone designator as UTC and leaves any value that already carries one (`Z`, `+05:30`, `-0500`) untouched. Times in tables are rendered in the viewer's local timezone; the query detail drawer shows the raw UTC value, and all daily metrics are UTC.

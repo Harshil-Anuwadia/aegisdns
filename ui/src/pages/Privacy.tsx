@@ -13,7 +13,6 @@ import {
   PageHeader,
   Panel,
   Skeleton,
-  Table,
   Toggle,
 } from "../components/ui";
 
@@ -67,12 +66,19 @@ export default function Privacy() {
                   : "Exposure is measured. Turn on budget enforcement when you are ready."}
               </p>
             </div>
+            {/* "At their limit" implies enforcement. When budgets are only
+                being measured, the same number is reported as what it is:
+                devices that have reached the budget threshold. */}
             <div className="privacy-banner-metric">
               <strong>
                 {over}
                 <span> / {query.data.devices.length}</span>
               </strong>
-              <small>devices at their limit</small>
+              <small>
+                {query.data.config.enabled
+                  ? "devices at their limit"
+                  : "devices over budget (not enforced)"}
+              </small>
             </div>
           </div>
           <div className="privacy-device-grid">
@@ -91,7 +97,11 @@ export default function Privacy() {
                       <p className="mono">{d.device}</p>
                     </div>
                     <Badge tone={d.score >= budget ? "warning" : "violet"}>
-                      {d.score >= budget ? "At limit" : "Within budget"}
+                      {d.score >= budget
+                        ? query.data!.config.enabled
+                          ? "At limit"
+                          : "Over budget"
+                        : "Within budget"}
                     </Badge>
                   </div>
                   <div className="budget-display">

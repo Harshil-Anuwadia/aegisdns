@@ -85,7 +85,12 @@ fn default_applications() -> Vec<(String, String)> {
 fn default_trackers() -> Vec<(String, String)> {
     vec![
         ("doubleclick.net".into(),"Google".into()),("google-analytics.com".into(),"Google".into()),("googletagmanager.com".into(),"Google".into()),("app-measurement.com".into(),"Google".into()),
-        ("facebook.net".into(),"Meta".into()),("facebook.com".into(),"Meta".into()),("segment.io".into(),"Twilio Segment".into()),("segment.com".into(),"Twilio Segment".into()),
+        // Only third-party tracking endpoints belong here. `facebook.com` was
+        // listed as well, which made a first-party visit to Facebook count as
+        // contacting a tracking company and double-counted it against the
+        // device's privacy score. `facebook.net` (connect.facebook.net) is the
+        // domain that actually serves the tracking pixel.
+        ("facebook.net".into(),"Meta".into()),("segment.io".into(),"Twilio Segment".into()),("segment.com".into(),"Twilio Segment".into()),
         ("mixpanel.com".into(),"Mixpanel".into()),("amplitude.com".into(),"Amplitude".into()),("hotjar.com".into(),"Hotjar".into()),("appsflyer.com".into(),"AppsFlyer".into()),
         ("adjust.com".into(),"Adjust".into()),("branch.io".into(),"Branch".into()),("criteo.com".into(),"Criteo".into()),("taboola.com".into(),"Taboola".into()),
     ]
@@ -113,6 +118,24 @@ impl DomainRegistry {
                 default_trackers()
             });
 
+        // A domain classified as both a first-party application and a
+        // third-party tracker is counted twice in the privacy score. The
+        // application meaning wins, because a user deliberately visiting a
+        // site is not the same as that site's pixel appearing elsewhere.
+        let mut trackers = trackers;
+        let overlap: Vec<String> = trackers
+            .iter()
+            .filter(|(domain, _)| applications.iter().any(|(app, _)| app == domain))
+            .map(|(domain, _)| domain.clone())
+            .collect();
+        if !overlap.is_empty() {
+            tracing::warn!(
+                "Ignoring tracker entries that are also applications: {}",
+                overlap.join(", ")
+            );
+            trackers.retain(|(domain, _)| !overlap.contains(domain));
+        }
+
         tracing::info!(
             "DomainRegistry loaded: {} applications, {} trackers",
             applications.len(),
@@ -139,10 +162,31 @@ pub fn reload() {
     }
 }
 
+/// True when `domain` is `suffix` itself or a subdomain of it.
+///
+/// Compared without allocating: the previous implementation built a
+/// `format!(".{suffix}")` String for every entry of every lookup, and this
+/// runs on the DNS hot path for each query.
+fn matches_suffix(domain: &str, suffix: &str) -> bool {
+    if domain == suffix {
+        return true;
+    }
+    // `domain` must end with `suffix` preceded by a dot, so that
+    // "notfacebook.com" never matches the suffix "facebook.com".
+    domain.len() > suffix.len()
+        && domain.ends_with(suffix)
+        && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
+}
+
+/// Find the most specific matching entry.
+///
+/// Longest-suffix wins so that a precise entry beats a broader parent domain
+/// regardless of the order entries appear in the file.
 fn lookup(entries: &[(String, String)], domain: &str) -> Option<String> {
     entries
         .iter()
-        .find(|(suffix, _)| domain == suffix.as_str() || domain.ends_with(&format!(".{suffix}")))
+        .filter(|(suffix, _)| matches_suffix(domain, suffix))
+        .max_by_key(|(suffix, _)| suffix.len())
         .map(|(_, name)| name.clone())
 }
 
@@ -168,4 +212,46 @@ fn network_prefix(ip:IpAddr)->String{match ip{
 #[cfg(test)] mod tests{
     use super::*;
     #[test] fn deterministic_classification(){assert_eq!(application("i.ytimg.com"),None);assert_eq!(application("www.youtube.com"),Some("YouTube".into()));assert_eq!(tracking_company("stats.doubleclick.net"),Some("Google".into()));assert!(contains_identifier("abc123def456ghi789jkl.example"));}
+
+    /// Suffix matching must respect label boundaries: a domain that merely
+    /// ends with the same characters is a different domain.
+    #[test] fn suffix_match_respects_label_boundaries(){
+        assert!(matches_suffix("facebook.com","facebook.com"));
+        assert!(matches_suffix("www.facebook.com","facebook.com"));
+        assert!(!matches_suffix("notfacebook.com","facebook.com"));
+        assert!(!matches_suffix("com","facebook.com"));
+    }
+
+    /// The most specific entry wins regardless of list order.
+    #[test] fn longest_suffix_wins(){
+        let entries=vec![
+            ("example.com".to_string(),"Broad".to_string()),
+            ("cdn.example.com".to_string(),"Specific".to_string()),
+        ];
+        assert_eq!(lookup(&entries,"cdn.example.com"),Some("Specific".into()));
+        assert_eq!(lookup(&entries,"other.example.com"),Some("Broad".into()));
+    }
+
+    /// No domain may be both a first-party application and a third-party
+    /// tracker, or it is counted twice in the privacy score.
+    #[test] fn defaults_do_not_classify_a_domain_twice(){
+        let apps=default_applications();
+        let overlap:Vec<_>=default_trackers().into_iter()
+            .filter(|(domain,_)|apps.iter().any(|(app,_)|app==domain))
+            .map(|(domain,_)|domain)
+            .collect();
+        assert!(overlap.is_empty(),"domains classified as both application and tracker: {overlap:?}");
+    }
+
+    #[test] fn network_prefix_groups_by_subnet(){
+        assert_eq!(network_prefix("192.168.1.55".parse().unwrap()),"192.168.1.0/24");
+        assert_eq!(network_prefix("2001:db8:1:2:3:4:5:6".parse().unwrap()),"2001:db8:1:2::/64");
+    }
+
+    /// Short labels and pure-digit labels are not tracking identifiers.
+    #[test] fn identifier_detection_needs_mixed_long_label(){
+        assert!(!contains_identifier("www.example.com"));
+        assert!(!contains_identifier("123456789012345678901234.example"),"digits only is not an identifier");
+        assert!(contains_identifier("a1b2c3d4e5f6g7h8i9j0k.example"));
+    }
 }

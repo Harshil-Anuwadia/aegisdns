@@ -126,6 +126,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the address this host answers with for blocked pages and actions.
+///
+/// `AEGIS_HOST_IP` wins, then the first usable `host_ips` entry from
+/// `config.json`, then loopback. The config file is located through
+/// `config::config_candidates()` so the daemon, the resolver and the
+/// container bind-mount all agree on which file is authoritative.
 fn load_host_ip()->String {
     if let Ok(ip)=std::env::var("AEGIS_HOST_IP") {if ip.parse::<std::net::Ipv4Addr>().is_ok() {return ip;}}
     let path=std::env::var("AEGIS_CONFIG").unwrap_or_else(|_|config::paths::get_data_dir().join("config.json").to_string_lossy().into_owned());

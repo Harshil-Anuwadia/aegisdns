@@ -32,7 +32,19 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     let active = true;
     void api<QueryEvent[]>("/recent")
       .then((rows) => {
-        if (active) setEvents((current) => [...current, ...rows].slice(0, 500));
+        // History is older than anything already streamed, so it belongs
+        // after the live events. Duplicates are possible because a query can
+        // arrive on the stream and also appear in this snapshot.
+        if (active)
+          setEvents((current) => {
+            const seen = new Set(
+              current.map((e) => `${e.timestamp}|${e.client_ip}|${e.domain}`),
+            );
+            const history = rows.filter(
+              (e) => !seen.has(`${e.timestamp}|${e.client_ip}|${e.domain}`),
+            );
+            return [...current, ...history].slice(0, 500);
+          });
       })
       .catch((error) => {
         if (active)
@@ -45,28 +57,57 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       .finally(() => {
         if (active) setHistoryLoading(false);
       });
-    const stream = new EventSource("/api/live-feed");
-    stream.onopen = () => setState("live");
-    stream.onerror = () => setState("disconnected");
-    stream.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (
-          typeof data.domain === "string" &&
-          typeof data.client_ip === "string" &&
-          typeof data.timestamp === "string" &&
-          typeof data.status === "string"
-        ) {
-          if (!data.timestamp) {
-            data.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    // The browser reconnects an EventSource automatically only when the
+    // server closes the stream cleanly. A dropped connection, a restarted
+    // daemon or a suspended laptop leaves it permanently closed, and the feed
+    // silently stayed empty until the user reloaded the page. Reconnect
+    // explicitly, backing off so a daemon that is down is not hammered.
+    let stream: EventSource | null = null;
+    let retry: number | undefined;
+    let attempt = 0;
+
+    const connect = () => {
+      if (!active) return;
+      stream = new EventSource("/api/live-feed");
+      stream.onopen = () => {
+        attempt = 0;
+        setState("live");
+      };
+      stream.onerror = () => {
+        setState("disconnected");
+        // Drop the dead handle; a new one is created for each attempt.
+        stream?.close();
+        stream = null;
+        if (!active) return;
+        // 1s, 2s, 4s … capped at 30s.
+        const delay = Math.min(1000 * 2 ** attempt++, 30000);
+        retry = window.setTimeout(connect, delay);
+      };
+      stream.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (
+            typeof data.domain === "string" &&
+            typeof data.client_ip === "string" &&
+            typeof data.timestamp === "string" &&
+            typeof data.status === "string"
+          ) {
+            if (!data.timestamp) {
+              data.timestamp = new Date()
+                .toISOString()
+                .replace("T", " ")
+                .slice(0, 19);
+            }
+            buffer.current.unshift(data);
           }
-          buffer.current.unshift(data);
+          buffer.current = buffer.current.slice(0, 500);
+        } catch {
+          /* Ignore malformed events without interrupting the stream. */
         }
-        buffer.current = buffer.current.slice(0, 500);
-      } catch {
-        /* Ignore malformed events without interrupting the stream. */
-      }
+      };
     };
+    connect();
+
     const timer = window.setInterval(() => {
       if (buffer.current.length) {
         const incoming = buffer.current.splice(0);
@@ -75,8 +116,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     }, 750);
     return () => {
       active = false;
-      stream.close();
+      stream?.close();
       clearInterval(timer);
+      if (retry !== undefined) clearTimeout(retry);
       buffer.current = [];
     };
   }, []);

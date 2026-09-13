@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import {
   useState,
+  useEffect,
   useId,
   cloneElement,
   isValidElement,
@@ -316,6 +317,16 @@ export function AsyncForm({
     [error, setError] = useState(""),
     [saved, setSaved] = useState(false);
   const qc = useQueryClient();
+  // "Done." is cleared when the user edits a field, but forms whose only
+  // control is the submit button (pause a schedule, release a device, send a
+  // test alert) never fire onChange, so the confirmation used to sit there
+  // permanently — and after a refetch it appeared next to a control showing
+  // the opposite state. Retire it on a timer instead.
+  useEffect(() => {
+    if (!saved) return;
+    const id = setTimeout(() => setSaved(false), 4000);
+    return () => clearTimeout(id);
+  }, [saved]);
   async function handle(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy) return;
@@ -373,16 +384,21 @@ export function PageLink({
 export function Table({
   headers,
   children,
+  label,
 }: {
   headers: string[];
   children: ReactNode;
+  /** Names this scrollable region. Every table previously announced the
+   *  identical "Data table", so screen reader users landing on one of the
+   *  several regions on a page could not tell them apart. */
+  label?: string;
 }) {
   return (
     <div
       className="table-scroll"
       tabIndex={0}
       role="region"
-      aria-label="Data table"
+      aria-label={label || "Data table"}
     >
       <table>
         <thead>

@@ -14,7 +14,7 @@ import "@fontsource/inter/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "./styles.css";
 import "./funding.css";
-import { AppShell, allPages } from "./components/AppShell";
+import { AppShell } from "./components/AppShell";
 import { LiveProvider } from "./live";
 import { ErrorState, Skeleton } from "./components/ui";
 import Overview from "./pages/Overview";

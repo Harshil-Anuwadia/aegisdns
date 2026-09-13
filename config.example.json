@@ -1,7 +1,15 @@
 {
   "host_ips": [
-    "127.0.0.1",
-    "192.168.1.100",
-    "100.x.x.x"
-  ]
+    "192.168.1.100"
+  ],
+  "resolver": {
+    "dnssec": true,
+    "qname_minimisation": true,
+    "ipv4": true,
+    "ipv6": true,
+    "cache": true
+  },
+  "policy": {
+    "profile": "balanced"
+  }
 }

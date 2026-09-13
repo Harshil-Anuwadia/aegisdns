@@ -44,21 +44,32 @@ export function useApi<T>(path: string, interval: number | false = false) {
 }
 export const number = (value: number | undefined) =>
   value === undefined ? "—" : value.toLocaleString();
+// Matches a trailing ISO 8601 timezone designator: "Z", "+05:30", "-0500", "-05".
+const HAS_TIMEZONE = /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i;
 export function timestamp(value: string) {
   if (!value) return new Date(NaN);
-  // Normalise to ISO 8601 UTC so all entries parse consistently:
-  // "2026-09-10 14:32:01"      → "2026-09-10T14:32:01Z"
-  // "2026-09-10T14:32:01"      → "2026-09-10T14:32:01Z"
-  // "2026-09-10T14:32:01.123Z" → kept as-is
-  let s = value.replace(" ", "T");
-  if (!s.endsWith("Z") && !s.includes("+")) s += "Z";
-  return new Date(s);
+  // The daemon stores naive UTC ("2026-09-10 14:32:01"), so a value without a
+  // timezone is normalised to ISO 8601 UTC and everything else is left alone:
+  //   "2026-09-10 14:32:01"       → "2026-09-10T14:32:01Z"
+  //   "2026-09-10T14:32:01"       → "2026-09-10T14:32:01Z"
+  //   "2026-09-10T14:32:01.123Z"  → kept as-is
+  //   "2026-09-10T14:32:01-05:00" → kept as-is
+  // Appending "Z" to an offset-bearing value used to produce an Invalid Date,
+  // which surfaced as a blank timestamp column. Only the date/time separator
+  // is replaced; a trailing offset never contains a space.
+  const s = value.trim().replace(" ", "T");
+  return new Date(HAS_TIMEZONE.test(s) ? s : `${s}Z`);
 }
 export function time(value: string) {
   const d = timestamp(value);
   return Number.isNaN(d.getTime())
     ? value
-    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    : d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
 }
 export const rate = (blocked: number, total: number) =>
   total ? ((blocked / total) * 100).toFixed(1) : "0.0";

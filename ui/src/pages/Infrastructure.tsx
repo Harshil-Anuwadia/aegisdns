@@ -5,14 +5,12 @@ import {
   Radio,
   Server,
   Shield,
-  Trash2,
   RefreshCw,
 } from "lucide-react";
-import { api, send, useApi } from "../api";
+import { send, useApi } from "../api";
 import type {
   Device,
   Dhcp,
-  Result,
   Telegram,
   Upstream as UpstreamData,
 } from "../types";
@@ -254,7 +252,10 @@ export function Diagnostics() {
             query threshold.
           </Empty>
         ) : (
-          <Table headers={["Device", "Address", "Action"]}>
+          <Table
+            label="Quarantined devices"
+            headers={["Device", "Address", "Action"]}
+          >
             {quarantine.data.map((ip) => (
               <tr key={ip}>
                 <td>

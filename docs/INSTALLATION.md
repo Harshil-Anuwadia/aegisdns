@@ -18,6 +18,22 @@ sudo policies that require authentication for every command. A long build may
 therefore be followed by another prompt before the CLI is installed or host DNS
 is changed.
 
+### Effect on `/etc/resolv.conf`
+
+If Tailscale is installed **and** currently accepting its DNS settings
+(`"CorpDNS": true`), the installer turns that off for the duration of the build
+so Docker can reach the internet, and restores it afterwards. Tailscale can
+leave its own resolver behind when disabled, so `/etc/resolv.conf` is repaired
+only when it points at Tailscale's stub (`100.100.100.100`) or lists no usable
+nameserver. A working resolver — a corporate DNS server, a VPN, or a
+systemd-resolved symlink — is left untouched. When the file is replaced, a
+timestamped copy is kept alongside it as
+`/etc/resolv.conf.aegis-backup.<seconds>`.
+
+Hosts without Tailscale, or with Tailscale not managing DNS, have
+`/etc/resolv.conf` left alone entirely during installation. Host DNS is
+switched to AegisDNS in the final step, and `aegis restore-dns` reverts it.
+
 The workflow:
 
 1. Review the installation plan and prerequisites.

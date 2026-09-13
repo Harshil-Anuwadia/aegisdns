@@ -27,7 +27,11 @@ export default function Support() {
       const link = document.createElement("a");
       link.href = url;
       link.download = "aegisdns-partnership.md";
+      // Firefox only honours a programmatic click on a connected anchor.
+      link.style.display = "none";
+      document.body.append(link);
       link.click();
+      link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setDownloadError("");
     } catch {

@@ -1,13 +1,11 @@
 import { useState } from "react";
-import { ShieldCheck, ShieldOff } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { number, send, useApi } from "../api";
 import type { DomainCount, Domains, Stats } from "../types";
 import {
   AsyncForm,
-  Badge,
   Empty,
   ErrorState,
-  Field,
   PageHeader,
   Panel,
   Skeleton,
@@ -92,11 +90,17 @@ export default function Blocking() {
         ) : !domains.data ? (
           <Skeleton />
         ) : (domains.data[kind as keyof Domains] || []).length ? (
-          <Table headers={["Domain", "Queries today", "Classification"]}>
+          <Table
+            label="Domain activity"
+            headers={["Domain", "Queries today", "Classification"]}
+          >
             {domains.data[kind as keyof Domains].map((d) => (
               <tr key={d.domain}>
                 <td>
-                  <a className="domain-link" href={`#network?domain=${encodeURIComponent(d.domain)}`}>
+                  <a
+                    className="domain-link"
+                    href={`#network?domain=${encodeURIComponent(d.domain)}`}
+                  >
                     <DomainIcon domain={d.domain} size="compact" />
                     {d.domain}
                   </a>
@@ -121,7 +125,13 @@ export default function Blocking() {
                     >
                       <option value="destination">Destination</option>
                       <option value="infrastructure">Infrastructure</option>
-                      <option value="unknown">Automatic / unknown</option>
+                      {/* "unknown" pins the domain to the Unclassified list;
+                          "reset" removes the manual override so automatic
+                          detection applies again. The single option that used
+                          to be labelled "Automatic / unknown" only ever did
+                          the former, leaving no way to undo a mistake. */}
+                      <option value="unknown">Unclassified</option>
+                      <option value="reset">Automatic (detect)</option>
                     </select>
                   </AsyncForm>
                 </td>
