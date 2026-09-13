@@ -560,12 +560,14 @@ cmd_start() {
         return 0
     fi
 
-    # Report Tailscale state without taking ownership of the user's VPN service.
+    # Ensure Tailscale is running if it's installed, as the container relies on its IP.
     if command -v tailscale &>/dev/null; then
         local ts_status
         ts_status=$(tailscale status 2>&1 || true)
         if echo "$ts_status" | grep -qi "stopped\|not running"; then
-            info "Tailscale is not running"
+            info "Starting Tailscale..."
+            sudo tailscale up >/dev/null 2>&1 || true
+            ok "Tailscale started"
         elif echo "$ts_status" | grep -qi "logged out\|NeedsLogin\|not logged in"; then
             info "Tailscale requires authentication to connect..."
             if sudo tailscale up; then
@@ -657,21 +659,9 @@ cmd_stop() {
     restore_dns || warn "DNS restoration encountered errors"
     ok "Host DNS restoration completed"
 
-    # ── Stop Tailscale ────────────────────────────────────────
-    if command -v tailscale &>/dev/null; then
-        local ts_status
-        ts_status=$(tailscale status 2>&1 || true)
-        if echo "$ts_status" | grep -qi "stopped\|not running"; then
-            detail "Tailscale is already stopped"
-        else
-            info "Stopping Tailscale..."
-            if sudo tailscale down >/dev/null 2>&1; then
-                ok "Tailscale stopped"
-            else
-                warn "Could not stop Tailscale (may need sudo)"
-            fi
-        fi
-    fi
+    # ── Tailscale Stop Logic Removed ──
+    # AegisDNS should not force-kill the user's Tailscale VPN connection.
+    # The VPN is a system-wide service and should remain up even if DNS stops.
 
     # ── DNS Safety Net ──
     # If resolv.conf is missing or points to Tailscale (which is now stopped),
