@@ -102,7 +102,7 @@ export default function Overview() {
           <div className="metric">
             <label>Avg. response</label>
             <strong>
-              {s?.avg_latency_ms ? s.avg_latency_ms.toFixed(1) : "—"}
+              {typeof s?.avg_latency_ms === "number" ? s.avg_latency_ms.toFixed(1) : "—"}
               <em>ms</em>
             </strong>
             <small>Allowed queries · last 5 min</small>

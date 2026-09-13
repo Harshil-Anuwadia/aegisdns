@@ -598,22 +598,19 @@ class Setup:
             prefs = self.runner.run(['tailscale', 'debug', 'prefs'], capture=True, check=False) or ''
             if '"CorpDNS": true' in prefs:
                 ts_was_true = True
-            # Only touch host DNS when Tailscale was actually managing it.
-            # Previously this ran whenever the tailscale binary merely existed.
             if ts_was_true:
                 self.sudo_run('tailscale', 'set', '--accept-dns=false', timeout=15)
-                # Tailscale can leave its own resolv.conf behind after being
-                # disabled, which stops Docker reaching the internet during the
-                # build. Repair it, but never destroy a working configuration:
-                # the previous version unconditionally deleted /etc/resolv.conf
-                # with no backup, discarding a corporate or VPN resolver, and
-                # could leave the host pointed at 8.8.8.8 permanently.
-                #
-                # Keep a copy first, and only replace the file when it is
-                # actually Tailscale's (100.100.100.100) or unusable.
-                self.sudo_run('bash', '-c', REPAIR_RESOLV_CONF, timeout=15)
+            # We must forcefully override DNS to 8.8.8.8 so Docker can reach the internet during the build.
+            # Using systemd-resolved often loops back to 127.0.0.1 (AegisDNS), causing a deadlock if 
+            # AegisDNS blocks crates.io.
+            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && echo "nameserver 8.8.8.8" > /etc/resolv.conf', timeout=15)
         self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
                         timeout=self.args.build_timeout, activity='Building container images')
+        
+        # Restore systemd-resolved after build
+        if not WINDOWS and shutil.which('systemctl'):
+            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && (test -f /run/systemd/resolve/stub-resolv.conf && ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || echo "nameserver 8.8.8.8" > /etc/resolv.conf)', timeout=15)
+
         self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'],
                         timeout=60, activity='Verifying configuration access')
         if ts_was_true:

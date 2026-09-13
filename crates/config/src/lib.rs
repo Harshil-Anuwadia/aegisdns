@@ -54,7 +54,7 @@ impl Default for ResolverConfig {
             dnssec: true,
             qname_minimisation: true,
             ipv4: true,
-            ipv6: true,
+            ipv6: false,
             cache: true,
         }
     }
@@ -222,7 +222,13 @@ pub fn load_main_config() -> Option<AegisConfig> {
 
 /// Canonical representation for all rule and DNS comparisons.
 pub fn canonical_domain(domain: &str) -> String {
-    domain.trim().trim_end_matches('.').to_ascii_lowercase()
+    let d = domain.trim().to_ascii_lowercase();
+    let trimmed = d.trim_end_matches('.');
+    if trimmed.is_empty() && !d.is_empty() {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn valid_domain(domain: &str) -> bool {

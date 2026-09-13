@@ -88,6 +88,7 @@ pub struct AnalyticsDb {
 impl AnalyticsDb {
     pub fn new(db_path: PathBuf) -> anyhow::Result<Self> {
         let conn = Connection::open(&db_path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
         let (insert_tx,mut insert_rx)=tokio::sync::mpsc::channel::<DbWrite>(10_000);
         let conn_arc=Arc::new(Mutex::new(conn));
@@ -279,6 +280,14 @@ impl AnalyticsDb {
     }
 
     pub async fn record_failure(&self, domain: &str, client_ip: &str) -> anyhow::Result<()> {
+        if !domain.ends_with(".arpa") && !domain.ends_with(".local") && domain != "localhost" {
+            let _ = self.live_tx.send(LiveQueryEvent {
+                domain: domain.to_string(),
+                timestamp: "".to_string(),
+                status: "failed".to_string(),
+                client_ip: client_ip.to_string(),
+            });
+        }
         self.enqueue(InsertQuery { domain:domain.into(), status:"failed".into(), latency_ms:0, client_ip:client_ip.into(), relationships:Vec::new() })?;
         Ok(())
     }
@@ -397,6 +406,7 @@ impl AnalyticsDb {
         let observation_limit = if domain.is_some() { 250_000 } else { 100_000 };
         tokio::task::spawn_blocking(move || -> anyhow::Result<RelationshipGraph> {
             let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let window = format!("-{hours} hours");
             let sql = if domain.is_some() {
                 "WITH recent AS (
@@ -456,6 +466,7 @@ impl AnalyticsDb {
         let db_path=self.db_path.clone();
         tokio::task::spawn_blocking(move ||->anyhow::Result<Vec<PrivacySummary>> {
             let conn=Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt=conn.prepare("SELECT client_ip,COUNT(*),COUNT(DISTINCT domain),SUM(status='blocked'),SUM(CAST(strftime('%H',timestamp) AS INTEGER)<6) FROM queries WHERE timestamp>=datetime('now','start of day') AND client_ip!='' GROUP BY client_ip ORDER BY COUNT(*) DESC")?;
             let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?,r.get::<_,u64>(3)?,r.get::<_,u64>(4)?)))?;
             let mut output=Vec::new();
@@ -488,8 +499,9 @@ impl AnalyticsDb {
         let status_filter = status_filter.map(str::to_owned);
         let ip_filter = ip_filter.map(str::to_owned);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RecentQuery>> {
-        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut res = Vec::new();
+            let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            let mut res = Vec::new();
 
         let mut query = "SELECT domain, timestamp, status, client_ip FROM queries WHERE timestamp >= datetime('now', ?) ".to_string();
         let mut params: Vec<String> = vec![format!("-{} days", days)];
@@ -531,8 +543,9 @@ impl AnalyticsDb {
         let db_path = self.db_path.clone();
         let ip_filter = ip_filter.map(str::to_owned);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RecentQuery>> {
-        let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut res = Vec::new();
+            let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            let mut res = Vec::new();
 
         if let Some(ip) = ip_filter.as_deref() {
             let mut stmt = conn.prepare("SELECT domain, timestamp, status, client_ip FROM queries WHERE client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' ORDER BY timestamp DESC LIMIT ?2")?;
@@ -634,16 +647,16 @@ impl AnalyticsDb {
                     conn.execute("DELETE FROM dns_relationships", [])?;
                 }
                 "1h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-1 hour')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-1 hour')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-1 hour')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-1 hour')", [])?;
                 }
                 "24h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-1 day')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-1 day')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-1 day')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-1 day')", [])?;
                 }
                 "7d" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp > datetime('now', '-7 days')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at > datetime('now', '-7 days')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-7 days')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-7 days')", [])?;
                 }
                 // An unrecognised timeframe used to be ignored while the API
                 // still answered "Logs deleted successfully", so a typo looked
@@ -663,6 +676,7 @@ impl AnalyticsDb {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Stats> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT
                 COUNT(*) as queries_today,
                 SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked_today,
@@ -713,6 +727,7 @@ impl AnalyticsDb {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Telemetry> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
             let mut stmt = conn.prepare("
                 SELECT strftime('%s', timestamp), status, latency_ms
@@ -774,6 +789,7 @@ impl AnalyticsDb {
         let ip = ip.to_string();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Stats> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT
                 COUNT(*) as queries_today,
                 SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked_today,
@@ -808,6 +824,7 @@ impl AnalyticsDb {
         let classifications = self.get_all_classifications();
         tokio::task::spawn_blocking(move || -> anyhow::Result<aggregation::AggregatedDomains> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 1000")?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let mut res = Vec::new();
@@ -820,6 +837,7 @@ impl AnalyticsDb {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, u64)>> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND status = 'blocked' AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 10")?;
             let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let mut res = Vec::new();
@@ -834,6 +852,7 @@ impl AnalyticsDb {
         let classifications = self.get_all_classifications();
         tokio::task::spawn_blocking(move || -> anyhow::Result<aggregation::AggregatedDomains> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 1000")?;
             let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let mut res = Vec::new();
@@ -847,6 +866,7 @@ impl AnalyticsDb {
         let ip = ip.to_string();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, u64)>> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND status = 'blocked' AND client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 5")?;
             let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row.get(1)?)))?;
             let mut res = Vec::new();
@@ -859,6 +879,7 @@ impl AnalyticsDb {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT DISTINCT client_ip FROM queries WHERE client_ip IS NOT NULL AND client_ip != '' AND timestamp >= datetime('now', '-1 day')")?;
             let rows = stmt.query_map([], |row| row.get(0))?;
             let mut res = Vec::new();

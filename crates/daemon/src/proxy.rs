@@ -27,6 +27,7 @@ pub struct DnsProxy {
     connections: Arc<Semaphore>,
     client_limits: moka::sync::Cache<IpAddr, Arc<Semaphore>>,
     typo_cache: Cache<String, bool>,
+    risk_cache: Cache<String, u8>,
     privacy: Arc<crate::privacy::PrivacyGuard>,
     ip_metadata: crate::relationships::IpMetadata,
 }
@@ -43,7 +44,9 @@ impl DnsProxy {
         Self { listen_addr:listen.into(), upstream_addr:upstream.into(), host_ip:host_ip.into(), analytics, action_domains, policy, blocklist, fast_flux,
             anomaly, telegram_config, device_registry, admission:Arc::new(Semaphore::new(256)), connections:Arc::new(Semaphore::new(128)),
             client_limits:moka::sync::Cache::builder().max_capacity(10_000).time_to_idle(Duration::from_secs(300)).build(),
-            typo_cache:Cache::builder().max_capacity(100_000).time_to_idle(Duration::from_secs(3600)).build(), privacy, ip_metadata }
+            typo_cache:Cache::builder().max_capacity(100_000).time_to_idle(Duration::from_secs(3600)).build(),
+            risk_cache:Cache::builder().max_capacity(100_000).time_to_idle(Duration::from_secs(3600)).build(),
+            privacy, ip_metadata }
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -138,15 +141,23 @@ impl DnsProxy {
             _ => {}
         }
         let canonical = config::canonical_domain(domain);
-        if self.typo_cache.get_with(canonical.clone(), async move { PolicyEngine::is_typosquatting(&canonical) }).await {
+        let c1 = canonical.clone();
+        if self.typo_cache.get_with(canonical.clone(), async move { PolicyEngine::is_typosquatting(&c1) }).await {
             return PolicyDecision::Blocked(policy::BlockReason::Phishing);
         }
         if self.privacy.should_block(client,domain).await { return PolicyDecision::Blocked(policy::BlockReason::PrivacyBudget); }
         if self.blocklist.read().await.is_blocked(domain) { return PolicyDecision::Blocked(policy::BlockReason::Tracker); }
-        // Heuristics are enforced only in the explicitly selected strict profile.
-        if profile == "strict" && risk::score_domain(domain).score >= 70 {
-            return PolicyDecision::Blocked(policy::BlockReason::Security);
+
+        // Heuristics are only enforced in the strict profile to avoid false positives
+        // on default and kids profiles where legitimate domains may score unexpectedly high.
+        if profile == "strict" {
+            let c2 = canonical.clone();
+            let risk_score = self.risk_cache.get_with(canonical, async move { risk::score_domain(&c2).score }).await;
+            if risk_score >= 60 {
+                return PolicyDecision::Blocked(policy::BlockReason::Security);
+            }
         }
+
         decision
     }
 
@@ -161,7 +172,7 @@ impl DnsProxy {
             let mut owner=config::canonical_domain(&record.name.to_ascii());
             if owner.is_empty(){owner=domain.to_string();}
             match &record.data{
-            RData::CNAME(name)=>edges.push(linked_observation(&owner,"domain","canonical_name",&config::canonical_domain(&name.0.to_ascii()),"domain")),
+            RData::CNAME(name)=>{let target=config::canonical_domain(&name.0.to_ascii());if !target.is_empty()&&target!="."{ edges.push(linked_observation(&owner,"domain","canonical_name",&target,"domain"));}},
             RData::A(ip)=>edges.extend(self.ip_metadata.observations(&owner,ip.0.into())),
             RData::AAAA(ip)=>edges.extend(self.ip_metadata.observations(&owner,ip.0.into())),
             RData::NS(name)=>edges.push(linked_observation(&owner,"domain","nameserver",&config::canonical_domain(&name.0.to_ascii()),"nameserver")),
@@ -224,6 +235,8 @@ impl DnsProxy {
                             RData::CNAME(name) if !bypass => {
                                 if matches!(self.decision(&config::canonical_domain(&name.0.to_ascii()), client).await, PolicyDecision::Blocked(_)) { unsafe_answer = true; }
                             }
+                            // DNS rebinding protection always applies, even for bypass clients.
+                            // bypass only skips policy/blocklist filtering, not network-level security.
                             RData::A(ip) if !local => { let ip=IpAddr::from(ip.0); unsafe_answer |= config::is_internal_address(ip); resolved_ips.push(ip); },
                             RData::AAAA(ip) if !local => { let ip=IpAddr::from(ip.0); unsafe_answer |= config::is_internal_address(ip); resolved_ips.push(ip); },
                             _ => {}
@@ -250,7 +263,8 @@ impl DnsProxy {
         }
         let tg = self.telegram_config.read().await.clone();
         if tg.enabled {
-            let score = risk::score_domain(&domain).score;
+            let canonical = config::canonical_domain(&domain);
+            let score = self.risk_cache.get_with(canonical.clone(), async move { risk::score_domain(&canonical).score }).await;
             if score >= tg.threat_threshold || (blocked && tg.notify_blocked) {
                 crate::telegram::send_alert(
                     self.telegram_config.clone(),

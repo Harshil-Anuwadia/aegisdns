@@ -249,8 +249,12 @@ impl FastFluxDetector {
             // CDNs
             "cloudflare.com", "cloudflare.net", "fastly.net", "akamai.net", "akamaiedge.net", 
             "akamaihd.net", "edgesuite.net",
+            // Netflix / Misc
+            "netflix.com", "nflxvideo.net", "nflxext.com", "nflximg.com",
+            // Dev infrastructure
+            "crates.io", "rust-lang.org",
             // Streaming / Gaming / Social
-            "nflximg.com", "nflxvideo.net", "nflxext.com", "twimg.com", "steamcommunity.com", 
+            "twimg.com", "steamcommunity.com", 
             "steampowered.com", "steamstatic.com", "discord.com", "discordapp.com", 
             "discordapp.net", "reddit.com", "redditmedia.com", "twitch.tv", "ttvnw.net",
             // Dev Tools
@@ -360,9 +364,9 @@ pub fn score_domain(domain: &str) -> RiskScore {
     };
     let name_part = if parts.len() >= 2 { parts[parts.len()-2] } else { domain };
 
-    // 1. Punycode / IDN Homograph (immediate critical signal)
-    if domain.contains("xn--") {
-        score += 40;
+    // 1. Punycode check
+    if domain.starts_with("xn--") || domain.contains(".xn--") {
+        score += 60;
         factors.push("Contains punycode (possible IDN homograph attack)".into());
     }
 
@@ -436,7 +440,23 @@ pub fn score_domain(domain: &str) -> RiskScore {
         score += 8;
         factors.push("Mixed alphanumeric pattern suggests automated generation".into());
     }
+
+    let full_domain_len = domain.len();
+    if full_domain_len > 120 {
+        score += 50;
+        factors.push(format!("Extreme domain length ({} chars) — potential DNS tunneling/exfiltration", full_domain_len));
+    } else if full_domain_len > 80 {
+        score += 25;
+        factors.push(format!("High domain length ({} chars) — suspicious for tunneling", full_domain_len));
+    }
+
+    let full_domain_entropy = shannon_entropy(domain);
+    if full_domain_entropy > 4.2 && full_domain_len > 60 {
+        score += 40;
+        factors.push(format!("Extreme overall entropy ({:.2}) over long string — likely encrypted/encoded tunnel", full_domain_entropy));
+    }
     
+
     // Feature 3: Typo-Squatting
     let mut base_sld = name_part.to_string();
     let suffixes = ["secure", "login", "account", "online", "official", "app"];
@@ -451,6 +471,7 @@ pub fn score_domain(domain: &str) -> RiskScore {
         }
     }
     
+    // Check the SLD for typosquatting
     for &brand in PROTECTED_BRANDS {
         if let Some(reason) = brand_impersonation(&base_sld, brand) {
             score += 60;
@@ -458,7 +479,20 @@ pub fn score_domain(domain: &str) -> RiskScore {
             break;
         }
     }
-    
+
+    // Check all OTHER subdomains for exact brand matches (e.g., paypal.example.com)
+    for part in &parts {
+        // Skip the actual SLD and TLDs, we only care about subdomains masking as brands
+        if *part == name_part || *part == tld { continue; }
+        
+        for &brand in PROTECTED_BRANDS {
+            if *part == brand || levenshtein(part, brand) == 1 {
+                score += 65;
+                factors.push(format!("Phishing indicator: subdomain '{}' impersonates brand '{}'", part, brand));
+                break;
+            }
+        }
+    }
     // Feature 4: Newly Registered Domain (NRD) Heuristic
     let is_nrd_tld = NRD_TLDS.contains(&tld);
     let no_vowels = !name_part.chars().any(|c| "aeiouy".contains(c));

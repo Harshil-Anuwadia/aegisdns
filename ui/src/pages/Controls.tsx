@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Clock3, ListFilter, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Clock3, ListFilter, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { number, send, useApi } from "../api";
 import type { Blocklist, Device, Policy, Schedule } from "../types";
 import {
@@ -196,7 +196,27 @@ export function Rules() {
 }
 export function Blocklists() {
   const query = useApi<Blocklist[]>("/lists"),
-    [open, setOpen] = useState(false);
+    [open, setOpen] = useState(false),
+    [downloading, setDownloading] = useState(false),
+    [elapsed, setElapsed] = useState(0),
+    [progress, setProgress] = useState(0);
+
+  // Animate progress bar while downloading (time-based, up to 95%)
+  useEffect(() => {
+    if (!downloading) return;
+    setElapsed(0);
+    setProgress(0);
+    const start = Date.now();
+    // Estimate 180s max; bar moves fast early, slows toward 95%
+    const tick = setInterval(() => {
+      const s = (Date.now() - start) / 1000;
+      setElapsed(Math.floor(s));
+      // Logarithmic growth: approaches 95% asymptotically
+      setProgress(Math.min(95, 95 * (1 - Math.exp(-s / 60))));
+    }, 500);
+    return () => clearInterval(tick);
+  }, [downloading]);
+
   return (
     <>
       <PageHeader
@@ -282,19 +302,29 @@ export function Blocklists() {
       </p>
       <Dialog
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => { if (!downloading) setOpen(false); }}
         title="Add a blocklist source"
         description="Use an HTTPS URL that serves a supported domain or hosts list."
       >
         <AsyncForm
           label="Add and download"
-          onSuccess={() => setOpen(false)}
-          submit={(d) =>
-            send("/blocklists", {
-              name: d.get("name"),
-              source_url: d.get("url"),
-            })
-          }
+          onSuccess={() => {
+            setProgress(100);
+            setTimeout(() => { setDownloading(false); setOpen(false); }, 600);
+          }}
+          submit={async (d) => {
+            setDownloading(true);
+            try {
+              await send("/blocklists", {
+                name: d.get("name"),
+                source_url: d.get("url"),
+              });
+            } catch (e) {
+              setDownloading(false);
+              setProgress(0);
+              throw e;
+            }
+          }}
         >
           <Field label="Source name">
             <input
@@ -302,6 +332,7 @@ export function Blocklists() {
               required
               maxLength={128}
               placeholder="My filtering list"
+              disabled={downloading}
             />
           </Field>
           <Field label="HTTPS URL">
@@ -311,11 +342,33 @@ export function Blocklists() {
               pattern="https://.*"
               required
               placeholder="https://example.com/blocklist.txt"
+              disabled={downloading}
             />
           </Field>
-          <p className="note">
-            Downloading and validating a source may take a moment.
-          </p>
+          {downloading && (
+            <div style={{ margin: "12px 0 4px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 12, color: "var(--text-secondary)" }}>
+                <span>Downloading &amp; validating…</span>
+                <span>{elapsed}s</span>
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${progress}%`,
+                    borderRadius: 3,
+                    background: "var(--accent)",
+                    transition: "width 0.5s ease",
+                  }}
+                />
+              </div>
+            </div>
+          )}
+          {!downloading && (
+            <p className="note">
+              Downloading and validating a source may take a moment.
+            </p>
+          )}
         </AsyncForm>
       </Dialog>
     </>

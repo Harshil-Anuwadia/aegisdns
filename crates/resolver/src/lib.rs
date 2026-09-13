@@ -158,16 +158,6 @@ server:
     pidfile: ""
     username: ""
 
-    # ── Block private addresses from being returned in public DNS answers ──
-    private-address: 192.168.0.0/16
-    private-address: 169.254.0.0/16
-    private-address: 172.16.0.0/12
-    private-address: 10.0.0.0/8
-    private-address: fc00::/7
-    private-address: 127.0.0.0/8
-    private-address: 100.64.0.0/10
-    private-address: ::ffff:0:0/96
-    private-address: fe80::/10
     tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
 "#);
         let upstream = config::upstream::UpstreamDnsConfig::load().unwrap_or_else(|e| {

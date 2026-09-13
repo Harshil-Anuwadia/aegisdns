@@ -97,8 +97,8 @@ impl BlocklistManager {
                     }
                 }
                 Err(e) => match old.sources.get(&list.source_url) {
-                    Some(previous) => { tracing::warn!("List {} failed: {}; keeping previous rules",list.name,e); previous.clone() }
-                    None => return Err(e.context(format!("No last-known-good rules for {}",list.name))),
+                    Some(previous) => { tracing::error!("List {} failed: {:?}",list.name,e); previous.clone() }
+                    None => { tracing::error!("List {} failed entirely: {:?}",list.name,e); return Err(e.context(format!("No last-known-good rules for {}",list.name))); },
                 }
             };
             list.rule_count=rules.blocked.len(); list.checksum=None;
@@ -114,7 +114,7 @@ impl BlocklistManager {
 }
 
 /// Parse only DNS-representable rules. Never reinterpret cosmetic or conditional rules as global blocks.
-fn parse_rules(text:&str)->(HashSet<String>,HashSet<String>) {
+pub(crate) fn parse_rules(text:&str)->(HashSet<String>,HashSet<String>) {
     let mut blocked=HashSet::new(); let mut allowed=HashSet::new();
     for raw in text.lines() {
         let line=raw.trim();
@@ -141,10 +141,18 @@ async fn fetch_list(source:&str)->anyhow::Result<String> {
     anyhow::ensure!(url.scheme()=="https" && url.username().is_empty() && url.password().is_none(),"Blocklists require HTTPS without embedded credentials");
     let host=url.host_str().ok_or_else(||anyhow::anyhow!("Missing host"))?;
     let port=url.port_or_known_default().unwrap_or(443);
+    // SSRF: validate every resolved address before connecting, regardless of IP version.
     let addrs:Vec<_>=tokio::time::timeout(std::time::Duration::from_secs(10),tokio::net::lookup_host((host,port))).await??.collect();
     anyhow::ensure!(!addrs.is_empty() && addrs.iter().all(|a|!config::is_internal_address(a.ip())),"Blocklist resolves to an internal/invalid address");
+    // Prefer IPv4 for the actual connection to avoid Docker IPv6 MTU blackholes on large
+    // downloads. SSRF check above already ran over the full address set.
+    let connect_addrs: Vec<_> = if addrs.iter().any(|a| a.is_ipv4()) {
+        addrs.iter().copied().filter(|a| a.is_ipv4()).collect()
+    } else {
+        addrs.clone()
+    };
     // Pin checked addresses. Redirects are rejected so a public URL cannot redirect into the LAN.
-    let client=reqwest::Client::builder().no_proxy().resolve_to_addrs(host,&addrs).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(60)).build()?;
+    let client=reqwest::Client::builder().no_proxy().resolve_to_addrs(host,&connect_addrs).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(300)).build()?;
     let mut response=client.get(url).send().await?.error_for_status()?;
     anyhow::ensure!(response.status().is_success(),"Blocklist redirect rejected");
     anyhow::ensure!(response.content_length().unwrap_or(0)<=64*1024*1024,"Blocklist too large");
@@ -165,5 +173,30 @@ async fn fetch_list(source:&str)->anyhow::Result<String> {
     #[test] fn case_insensitive_lookup() {
         let m=BlocklistManager{lists:vec![],compiled_domains:HashSet::from(["example.com".into()]),compiled_exceptions:HashSet::from(["allowed.example.com".into()])};
         assert!(m.is_blocked("ADS.EXAMPLE.COM."));assert!(!m.is_blocked("allowed.example.com"));
+    }
+    #[test] fn parse_abp_format() {
+        let abp = "! Title: Test\n||ads.example.com^\n||tracker.bad.net^\n! comment\n||ok.org^\n";
+        let (blocked, _) = parse_rules(abp);
+        assert!(blocked.contains("ads.example.com"), "should parse ABP ||domain^");
+        assert!(blocked.contains("tracker.bad.net"));
+        assert!(blocked.contains("ok.org"));
+        assert!(!blocked.iter().any(|d| d.starts_with('!')), "comments must be stripped");
+    }
+    #[test] fn parse_plain_domain_format() {
+        let plain = "# plain list\nads.example.com\ntracker.net\n";
+        let (blocked, _) = parse_rules(plain);
+        assert!(blocked.contains("ads.example.com"));
+        assert!(blocked.contains("tracker.net"));
+    }
+    #[test] fn parse_hosts_localhost_excluded() {
+        let hosts = "127.0.0.1 malware.example.com\n0.0.0.0 ads.test.com\n127.0.0.1 localhost\n";
+        let (blocked, _) = parse_rules(hosts);
+        assert!(blocked.contains("malware.example.com"));
+        assert!(blocked.contains("ads.test.com"));
+        assert!(!blocked.contains("localhost"), "localhost must not be blocked");
+    }
+    #[test] fn empty_list_yields_no_rules() {
+        let (blocked, _) = parse_rules("# only a comment\n");
+        assert!(blocked.is_empty());
     }
 }

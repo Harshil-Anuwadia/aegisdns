@@ -166,7 +166,6 @@ export default function Network() {
             .filter((e) => e.source === n.id || e.target === n.id)
             .reduce((a, e) => a + e.count, 0),
         },
-        selected: selected?.id === n.id,
       };
     });
     return {
@@ -178,17 +177,8 @@ export default function Network() {
         id: `${e.source}-${e.target}-${i}`,
         source: e.source,
         target: e.target,
-        label:
-          selected && (e.source === selected.id || e.target === selected.id)
-            ? e.relation.replaceAll("_", " ")
-            : undefined,
-        style: {
-          stroke:
-            selected && (e.source === selected.id || e.target === selected.id)
-              ? "var(--accent)"
-              : "var(--border)",
-          strokeWidth: 1.5,
-        },
+        label: undefined as string | undefined,
+        style: { stroke: "var(--border)", strokeWidth: 1.5 },
         labelStyle: { fill: "var(--text-secondary)", fontSize: 11 },
         labelBgStyle: { fill: "var(--surface)" },
       })),
@@ -202,6 +192,7 @@ export default function Network() {
         (e) => e.source === selected.id || e.target === selected.id,
       )
     : [];
+  const connectionsTruncated = connections.length > 40;
   return (
     <>
       <PageHeader
@@ -312,7 +303,7 @@ export default function Network() {
                 // old, larger graph.
                 key={`${domain}-${hours}-${device}-${minCount}-${limit}`}
                 nodes={layout.nodes}
-                edges={layout.edges}
+                edges={displayEdges}
                 nodeTypes={nodeTypes}
                 fitView
                 fitViewOptions={{ padding: 0.12, maxZoom: 0.85 }}
@@ -387,23 +378,28 @@ export default function Network() {
                   <Badge>{connections.length} direct links</Badge>
                 </div>
                 <div className="connection-list">
-                  {connections.slice(0, 40).map((e, i) => {
+                  {connections.slice(0, 40).map((e) => {
                     const id = e.source === selected.id ? e.target : e.source;
                     const other = query.data.nodes.find((n) => n.id === id);
                     return (
                       <button
-                        key={i}
+                        key={`${e.source}|${e.relation}|${e.target}`}
                         onClick={() => setSelected(other || null)}
                       >
                         <small>{e.relation.replaceAll("_", " ")}</small>
                         <strong>{other?.label || id}</strong>
                         <span>{number(e.count)} observations</span>
-                        <time>
-                          {e.first_seen} → {e.last_seen} UTC
+                        <time title={`${e.first_seen} – ${e.last_seen} UTC`}>
+                          {formatTs(e.first_seen)} → {formatTs(e.last_seen)}
                         </time>
                       </button>
                     );
                   })}
+                  {connectionsTruncated && (
+                    <p className="footnote" style={{ padding: "8px 12px" }}>
+                      Showing first 40 of {connections.length} links. Raise the activity threshold to focus the view.
+                    </p>
+                  )}
                 </div>
               </>
             ) : (
