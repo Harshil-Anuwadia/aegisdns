@@ -78,7 +78,7 @@ export default function Network() {
     15000,
   );
   const layout = useMemo(() => {
-    if (!query.data) return { nodes: [], edges: [] };
+    if (!query.data) return { nodes: [], edges: [], visibleEdges: [] };
     let raw = query.data.nodes,
       edges = [...query.data.edges].sort(
         (a, b) => b.count - a.count || b.last_seen.localeCompare(a.last_seen),
@@ -171,6 +171,9 @@ export default function Network() {
     });
     return {
       nodes,
+      // The unstyled, already-filtered edges. The inspector reads these so it
+      // can never list a connection the canvas is not drawing.
+      visibleEdges: edges,
       edges: edges.map((e, i) => ({
         id: `${e.source}-${e.target}-${i}`,
         source: e.source,
@@ -191,10 +194,14 @@ export default function Network() {
       })),
     };
   }, [query.data, selected, device]);
-  const connections =
-    query.data?.edges.filter(
-      (e) => e.source === selected?.id || e.target === selected?.id,
-    ) || [];
+  // Derived from the rendered edge set, not the raw response: with a device
+  // focus applied the two differ, and the inspector used to report (and link
+  // to) neighbours that had been filtered off the canvas.
+  const connections = selected
+    ? layout.visibleEdges.filter(
+        (e) => e.source === selected.id || e.target === selected.id,
+      )
+    : [];
   return (
     <>
       <PageHeader
@@ -299,7 +306,11 @@ export default function Network() {
           <Panel className="graph-canvas">
             {layout.nodes.length ? (
               <ReactFlow
-                key={`${domain}-${hours}-${device}`}
+                // Remounting re-runs fitView. Every filter that changes which
+                // nodes exist belongs in the key; minCount and limit were
+                // missing, so tightening them left the viewport framed on the
+                // old, larger graph.
+                key={`${domain}-${hours}-${device}-${minCount}-${limit}`}
                 nodes={layout.nodes}
                 edges={layout.edges}
                 nodeTypes={nodeTypes}
