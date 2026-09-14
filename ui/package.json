@@ -17,14 +17,14 @@
     "@xyflow/react": "^12.8.5",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
+    "react-dom": "^19.3.0",
     "recharts": "^3.2.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.55.1",
     "@types/react": "^19.1.13",
-    "@types/react-dom": "^19.1.9",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.0.3",
     "prettier": "^3.9.6",
     "typescript": "^5.9.2",
