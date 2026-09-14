@@ -5,6 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
+fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value = row.get::<_, Option<i64>>(index)?.unwrap_or(0);
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
 #[derive(Debug, Default)]
 pub struct Stats {
     pub queries_today: u64,
@@ -444,7 +449,7 @@ impl AnalyticsDb {
                 let source_kind: String = row.get(1)?;
                 let target: String = row.get(3)?;
                 let target_kind: String = row.get(4)?;
-                Ok(RelationshipEdge { source:format!("{source_kind}:{source}"), target:format!("{target_kind}:{target}"), relation:row.get(2)?, count:row.get(5)?, first_seen:row.get(6)?, last_seen:row.get(7)? })
+                Ok(RelationshipEdge { source:format!("{source_kind}:{source}"), target:format!("{target_kind}:{target}"), relation:row.get(2)?, count:row_u64(row,5)?, first_seen:row.get(6)?, last_seen:row.get(7)? })
             };
             let mut edges=Vec::new();
             if let Some(ref selected)=domain {
@@ -471,15 +476,15 @@ impl AnalyticsDb {
             let conn=Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt=conn.prepare("SELECT client_ip,COUNT(*),COUNT(DISTINCT domain),SUM(status='blocked'),SUM(CAST(strftime('%H',timestamp) AS INTEGER)<6) FROM queries WHERE timestamp>=datetime('now','start of day') AND client_ip!='' GROUP BY client_ip ORDER BY COUNT(*) DESC")?;
-            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?,r.get::<_,u64>(3)?,r.get::<_,u64>(4)?)))?;
+            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,row_u64(r,1)?,row_u64(r,2)?,row_u64(r,3)?,row_u64(r,4)?)))?;
             let mut output=Vec::new();
             for row in rows {
                 let (device,total,unique,blocked,quiet)=row?;
                 let distinct=|kind:&str,relation:Option<&str>|->anyhow::Result<u64>{
                     Ok(if let Some(relation)=relation {
-                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2 AND relation=?3",rusqlite::params![&device,kind,relation],|r|r.get(0))?
+                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2 AND relation=?3",rusqlite::params![&device,kind,relation],|r|row_u64(r,0))?
                     } else {
-                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2",rusqlite::params![&device,kind],|r|r.get(0))?
+                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2",rusqlite::params![&device,kind],|r|row_u64(r,0))?
                     })
                 };
                 let tracking_companies=distinct("company",None)?;
@@ -601,12 +606,12 @@ impl AnalyticsDb {
 
         let mut rows = stmt.query([domain])?;
         if let Some(row) = rows.next()? {
-            total_requests = row.get(0).unwrap_or(0);
+            total_requests = row_u64(row,0)?;
             first_seen = row.get(1).unwrap_or_else(|_| "Never".to_string());
             last_seen = row.get(2).unwrap_or_else(|_| "Never".to_string());
-            blocked_count = row.get(3).unwrap_or(0);
-            allowed_count = row.get(4).unwrap_or(0);
-            cached_count = row.get(5).unwrap_or(0);
+            blocked_count = row_u64(row,3)?;
+            allowed_count = row_u64(row,4)?;
+            cached_count = row_u64(row,5)?;
         }
 
         let mut stmt_dev = conn.prepare("
@@ -623,7 +628,7 @@ impl AnalyticsDb {
         while let Some(row) = rows_dev.next()? {
             devices.push(DeviceInsight {
                 ip: row.get(0)?,
-                count: row.get(1)?,
+                count: row_u64(row,1)?,
             });
         }
 
@@ -690,10 +695,10 @@ impl AnalyticsDb {
 
             let mut rows = stmt.query([])?;
             if let Some(row) = rows.next()? {
-                let queries_today: u64 = row.get(0).unwrap_or(0);
-                let blocked_today: u64 = row.get(1).unwrap_or(0);
-                let allowed_today: u64 = row.get(2).unwrap_or(0);
-                let cache_hits: u64 = row.get(3).unwrap_or(0);
+                let queries_today = row_u64(row,0)?;
+                let blocked_today = row_u64(row,1)?;
+                let allowed_today = row_u64(row,2)?;
+                let cache_hits = row_u64(row,3)?;
 
                 // Rolling 5-minute average: reflects actual current performance,
                 // not a cumulative all-day average that gets polluted by old slow queries.
@@ -804,10 +809,10 @@ impl AnalyticsDb {
 
             let mut rows = stmt.query([ip])?;
             if let Some(row) = rows.next()? {
-                let queries_today: u64 = row.get(0).unwrap_or(0);
-                let blocked_today: u64 = row.get(1).unwrap_or(0);
-                let allowed_today: u64 = row.get(2).unwrap_or(0);
-                let cache_hits: u64 = row.get(3).unwrap_or(0);
+                let queries_today = row_u64(row,0)?;
+                let blocked_today = row_u64(row,1)?;
+                let allowed_today = row_u64(row,2)?;
+                let cache_hits = row_u64(row,3)?;
                 let avg_latency: f64 = row.get(4).unwrap_or(0.0);
 
                 Ok(Stats {
@@ -829,7 +834,7 @@ impl AnalyticsDb {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 1000")?;
-            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row_u64(row,1)?)))?;
             let mut res = Vec::new();
             for r in rows { res.push(r?); }
             Ok(aggregation::aggregate_and_classify_domains(res, &classifications))
@@ -842,7 +847,7 @@ impl AnalyticsDb {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND status = 'blocked' AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 10")?;
-            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row_u64(row,1)?)))?;
             let mut res = Vec::new();
             for r in rows { res.push(r?); }
             Ok(res)
@@ -857,7 +862,7 @@ impl AnalyticsDb {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 1000")?;
-            let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row_u64(row,1)?)))?;
             let mut res = Vec::new();
             for r in rows { res.push(r?); }
             Ok(aggregation::aggregate_and_classify_domains(res, &classifications))
@@ -871,7 +876,7 @@ impl AnalyticsDb {
             let conn = Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut stmt = conn.prepare("SELECT domain, COUNT(*) as c FROM queries WHERE timestamp >= datetime('now', 'start of day') AND status = 'blocked' AND client_ip = ?1 AND domain NOT LIKE '%.arpa' AND domain != 'localhost' AND domain NOT LIKE '%.local' GROUP BY domain ORDER BY c DESC LIMIT 5")?;
-            let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rows = stmt.query_map([ip], |row| Ok((row.get(0)?, row_u64(row,1)?)))?;
             let mut res = Vec::new();
             for r in rows { res.push(r?); }
             Ok(res)
