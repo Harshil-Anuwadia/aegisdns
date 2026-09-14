@@ -93,10 +93,13 @@ test("navigation, command search, themes, and keyboard dismissal", async ({
     await expect(page.getByRole("dialog")).toHaveCount(0);
   }
 });
-test("disabled remote favicon lookup shows domain names without icon requests", async ({ page }) => {
+test("disabled remote favicon lookup shows domain names without icon requests", async ({
+  page,
+}) => {
   let faviconRequests = 0;
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname === "/api/favicon") faviconRequests += 1;
+    if (new URL(request.url()).pathname === "/api/favicon")
+      faviconRequests += 1;
   });
   await mockApi(page);
   await page.goto("/#overview");
@@ -193,8 +196,8 @@ test("graph node inspection and history filter", async ({ page }) => {
   );
   await page.getByLabel("Relationship history").selectOption("168");
   await request;
-  const bounded = page.waitForRequest((r) =>
-    r.url().includes("limit=120") && r.url().includes("min_count=20"),
+  const bounded = page.waitForRequest(
+    (r) => r.url().includes("limit=120") && r.url().includes("min_count=20"),
   );
   await page.getByLabel("Minimum observations").selectOption("20");
   await page.getByLabel("Graph size").selectOption("120");
@@ -264,6 +267,27 @@ test("settings save their real contracts without restarting DNS", async ({
   expect(writes[2].body.lease_duration_secs).toBe(7200);
   expect(writes.some((w) => w.path === "/restart")).toBe(false);
   expect(writes.every((w) => w.header === "1")).toBe(true);
+});
+
+test("service restart requires confirmation and sends the restart request", async ({
+  page,
+}) => {
+  const writes = await mockApi(page);
+  await page.goto("/#settings");
+  await page.getByRole("button", { name: "Restart service" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Restart AegisDNS?" }),
+  ).toBeVisible();
+  expect(writes.some((write) => write.path === "/restart")).toBe(false);
+  await page.getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect
+    .poll(() => writes.some((write) => write.path === "/restart"))
+    .toBe(true);
+  expect(writes.find((write) => write.path === "/restart")).toMatchObject({
+    method: "POST",
+    header: "1",
+  });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("schedule creation, pause, and confirmed removal", async ({ page }) => {

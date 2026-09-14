@@ -156,6 +156,35 @@ detect_ip() {
     echo "$ip"
 }
 
+uses_tailscale() {
+    local ip first second _third _fourth
+    ip=$(detect_ip)
+    IFS=. read -r first second _third _fourth <<< "$ip"
+    [ "$first" = "100" ] && [ "${second:-0}" -ge 64 ] 2>/dev/null && [ "$second" -le 127 ]
+}
+
+ensure_tailscale() {
+    uses_tailscale || return 0
+    if ! command -v tailscale &>/dev/null; then
+        fail "This installation uses a Tailscale address, but Tailscale is unavailable"
+        return 1
+    fi
+    if tailscale ip -4 >/dev/null 2>&1; then
+        ok "Tailscale is running"
+        return 0
+    fi
+    info "Connecting Tailscale..."
+    if ! sudo tailscale up; then
+        fail "Tailscale could not be connected"
+        return 1
+    fi
+    if ! tailscale ip -4 >/dev/null 2>&1; then
+        fail "Tailscale connected without a usable IPv4 address"
+        return 1
+    fi
+    ok "Tailscale connected"
+}
+
 get_admin_password() {
     local password="${AEGIS_ADMIN_PASSWORD:-}"
     if [ -z "$password" ] && [ -f "$AEGIS_DIR/.env" ]; then
@@ -560,26 +589,9 @@ cmd_start() {
         return 0
     fi
 
-    # Ensure Tailscale is running if it's installed, as the container relies on its IP.
-    if command -v tailscale &>/dev/null; then
-        local ts_status
-        ts_status=$(tailscale status 2>&1 || true)
-        if echo "$ts_status" | grep -qi "stopped\|not running"; then
-            info "Starting Tailscale..."
-            sudo tailscale up >/dev/null 2>&1 || true
-            ok "Tailscale started"
-        elif echo "$ts_status" | grep -qi "logged out\|NeedsLogin\|not logged in"; then
-            info "Tailscale requires authentication to connect..."
-            if sudo tailscale up; then
-                ok "Tailscale connected"
-            else
-                warn "Tailscale is not logged in — cannot start in Tailscale mode"
-                return 1
-            fi
-        else
-            ok "Tailscale is running"
-        fi
-    fi
+    # Tailscale is the default installation mode, but a LAN installation must
+    # never start or stop an unrelated Tailscale session on the same machine.
+    ensure_tailscale || return 1
 
     # Detect IP
     local ip
@@ -660,7 +672,7 @@ cmd_stop() {
     ok "Host DNS restoration completed"
 
     # ── Stop Tailscale ────────────────────────────────────────
-    if command -v tailscale &>/dev/null; then
+    if uses_tailscale && command -v tailscale &>/dev/null; then
         local ts_status
         ts_status=$(tailscale status 2>&1 || true)
         if echo "$ts_status" | grep -qi "stopped\|not running"; then
@@ -710,19 +722,7 @@ cmd_restart() {
     if is_running; then
         cd "$AEGIS_DIR"
 
-        # Ensure Tailscale is running if installed
-        if command -v tailscale &>/dev/null; then
-            local ts_status
-            ts_status=$(tailscale status 2>&1 || true)
-            if echo "$ts_status" | grep -qi "stopped\|not running"; then
-                info "Starting Tailscale..."
-                sudo tailscale up >/dev/null 2>&1 || true
-                ok "Tailscale started"
-            elif echo "$ts_status" | grep -qi "logged out\|NeedsLogin\|not logged in"; then
-                info "Tailscale requires authentication to connect..."
-                sudo tailscale up || warn "Tailscale is not logged in"
-            fi
-        fi
+        ensure_tailscale || return 1
 
         # Refresh IP and config before restart
         local ip
@@ -735,15 +735,13 @@ cmd_restart() {
 
         # Recreate container in case image was updated
         local compose_output
-        if compose_output=$(docker_cmd compose up -d 2>&1); then
+        if compose_output=$(docker_cmd compose up -d --force-recreate 2>&1); then
             printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 | sed -u 's/^/      /' || true
         else
             printf '%s\n' "$compose_output" | sed -u 's/^/      /'
             fail "Container restart failed"
             return 1
         fi
-        printf '%s\n' "$compose_output" | grep -v "^$" | tail -5 || true
-
         info "Waiting for API..."
         if wait_for_api; then
             # Auto-register the host device so it appears on the dashboard immediately

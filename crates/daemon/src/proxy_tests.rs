@@ -131,6 +131,24 @@ fn proxy(upstream:&str)->DnsProxy {
     upstream.await.unwrap();
 }
 
+#[tokio::test] async fn cdn_cname_does_not_trigger_fast_flux_false_positive() {
+    let sock=UdpSocket::bind("127.0.0.1:0").await.unwrap();let addr=sock.local_addr().unwrap().to_string();
+    let upstream=tokio::spawn(async move {
+        let mut buf=vec![0;4096];let (n,src)=sock.recv_from(&mut buf).await.unwrap();let q=Message::from_vec(&buf[..n]).unwrap();
+        let mut r=dns::reply(&q,ResponseCode::NoError);
+        let target=Name::from_ascii("dualstack.k.sni.global.fastly.net.").unwrap();
+        r.add_answer(Record::from_rdata(q.queries[0].name.clone(),30,RData::CNAME(CNAME(target.clone()))));
+        for ip in ["8.8.8.8","9.9.9.9","1.1.1.1","208.67.222.222","4.2.2.1","64.6.64.6","76.76.2.0","94.140.14.14","185.228.168.9","45.90.28.0"] {
+            r.add_answer(Record::from_rdata(target.clone(),30,RData::A(A(ip.parse().unwrap()))));
+        }
+        sock.send_to(&r.to_vec().unwrap(),src).await.unwrap();
+    });
+    let p=proxy(&addr);let q=query("index.crates.io");
+    let r=Message::from_vec(&p.process(&q.to_vec().unwrap(),"192.168.1.3",false).await.unwrap()).unwrap();
+    assert_eq!(r.metadata.response_code,ResponseCode::NoError);
+    upstream.await.unwrap();
+}
+
 #[tokio::test] async fn tcp_connection_accepts_multiple_queries() {
     let p=proxy("127.0.0.1:1");p.policy.write().await.deny("blocked.example".into());
     let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let addr=listener.local_addr().unwrap();

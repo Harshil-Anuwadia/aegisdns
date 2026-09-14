@@ -153,7 +153,7 @@ impl DnsProxy {
         if profile == "strict" {
             let c2 = canonical.clone();
             let risk_score = self.risk_cache.get_with(canonical, async move { risk::score_domain(&c2).score }).await;
-            if risk_score >= 60 {
+            if risk_score >= 70 {
                 return PolicyDecision::Blocked(policy::BlockReason::Security);
             }
         }
@@ -230,10 +230,13 @@ impl DnsProxy {
                 Ok(Ok(r)) => {
                     let mut unsafe_answer = false;
                     let mut resolved_ips = Vec::new();
+                    let mut flux_exempt = risk::FastFluxDetector::is_exempt(&domain);
                     for record in r.answers.iter().chain(&r.additionals) {
                         match &record.data {
-                            RData::CNAME(name) if !bypass => {
-                                if matches!(self.decision(&config::canonical_domain(&name.0.to_ascii()), client).await, PolicyDecision::Blocked(_)) { unsafe_answer = true; }
+                            RData::CNAME(name) => {
+                                let target=config::canonical_domain(&name.0.to_ascii());
+                                flux_exempt |= risk::FastFluxDetector::is_exempt(&target);
+                                if !bypass && matches!(self.decision(&target, client).await, PolicyDecision::Blocked(_)) { unsafe_answer = true; }
                             }
                             // DNS rebinding protection always applies, even for bypass clients.
                             // bypass only skips policy/blocklist filtering, not network-level security.
@@ -242,7 +245,7 @@ impl DnsProxy {
                             _ => {}
                         }
                     }
-                    if !local && !bypass && !resolved_ips.is_empty() {
+                    if !local && !bypass && !flux_exempt && !resolved_ips.is_empty() {
                         let mut detector=self.fast_flux.write().await;
                         for ip in resolved_ips { detector.record_resolution(&domain,ip); }
                         unsafe_answer |= detector.is_fast_flux(&domain);

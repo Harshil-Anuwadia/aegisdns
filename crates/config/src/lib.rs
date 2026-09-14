@@ -54,7 +54,7 @@ impl Default for ResolverConfig {
             dnssec: true,
             qname_minimisation: true,
             ipv4: true,
-            ipv6: false,
+            ipv6: true,
             cache: true,
         }
     }

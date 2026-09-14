@@ -183,6 +183,21 @@ struct FluxHistory {
 
 const MAX_TRACKED_DOMAINS: usize = 10_000;
 const HISTORY_TTL: Duration = Duration::from_secs(600);
+const FAST_FLUX_EXEMPT_SUFFIXES: &[&str] = &[
+    "google.com", "youtube.com", "ytimg.com", "ggpht.com", "googleapis.com",
+    "googleusercontent.com", "gstatic.com", "googlevideo.com", "gvt1.com", "gvt2.com",
+    "microsoft.com", "windows.com", "windowsupdate.com", "azure.com", "azureedge.net",
+    "visualstudio.com", "live.com", "office.com", "office.net", "skype.com", "msn.com",
+    "apple.com", "icloud.com", "mzstatic.com", "cdn-apple.com", "amazonaws.com", "cloudfront.net",
+    "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.net",
+    "cloudflare.com", "cloudflare.net", "fastly.net", "akamai.net", "akamaiedge.net",
+    "akamaihd.net", "edgesuite.net", "netflix.com", "nflxvideo.net", "nflxext.com", "nflximg.com",
+    "crates.io", "rust-lang.org", "twimg.com", "steamcommunity.com", "steampowered.com",
+    "steamstatic.com", "discord.com", "discordapp.com", "discordapp.net", "reddit.com",
+    "redditmedia.com", "twitch.tv", "ttvnw.net", "docker.io", "docker.com", "github.com",
+    "githubcopilot.com", "githubusercontent.com", "lenovo.com", "hp.com", "dell.com",
+    "tailscale.com", "tailscale.io", "ts.net",
+];
 
 impl FastFluxDetector {
     pub fn new() -> Self {
@@ -229,47 +244,16 @@ impl FastFluxDetector {
         self.least_recent.insert((self.sequence, domain));
     }
 
+    pub fn is_exempt(domain: &str) -> bool {
+        let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+        FAST_FLUX_EXEMPT_SUFFIXES.iter().any(|suffix| {
+            domain == *suffix || domain.ends_with(&format!(".{suffix}"))
+        })
+    }
+
     pub fn is_fast_flux(&mut self, domain: &str) -> bool {
         let domain = domain.to_lowercase();
-        
-        // Whitelist massive CDNs and services that legitimately rotate IPs wildly (Fast-Flux bypass only)
-        let whitelist = [
-            // Google / YouTube
-            "google.com", "youtube.com", "ytimg.com", "ggpht.com", "googleapis.com", 
-            "googleusercontent.com", "gstatic.com", "googlevideo.com", "gvt1.com", "gvt2.com",
-            // Microsoft / Azure
-            "microsoft.com", "windows.com", "windowsupdate.com", "azure.com", "azureedge.net", 
-            "visualstudio.com", "live.com", "office.com", "office.net", "skype.com", "msn.com",
-            // Apple
-            "apple.com", "icloud.com", "mzstatic.com", "cdn-apple.com",
-            // Amazon AWS
-            "amazonaws.com", "cloudfront.net",
-            // Meta / Facebook
-            "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.net",
-            // CDNs
-            "cloudflare.com", "cloudflare.net", "fastly.net", "akamai.net", "akamaiedge.net", 
-            "akamaihd.net", "edgesuite.net",
-            // Netflix / Misc
-            "netflix.com", "nflxvideo.net", "nflxext.com", "nflximg.com",
-            // Dev infrastructure
-            "crates.io", "rust-lang.org",
-            // Streaming / Gaming / Social
-            "twimg.com", "steamcommunity.com", 
-            "steampowered.com", "steamstatic.com", "discord.com", "discordapp.com", 
-            "discordapp.net", "reddit.com", "redditmedia.com", "twitch.tv", "ttvnw.net",
-            // Dev Tools
-            "docker.io", "docker.com", "github.com", "githubcopilot.com", "githubusercontent.com",
-            // Hardware
-            "lenovo.com", "hp.com", "dell.com",
-            // Network & VPN
-            "tailscale.com", "tailscale.io", "ts.net"
-        ];
-        
-        for w in &whitelist {
-            if domain == *w || domain.ends_with(format!(".{}", w).as_str()) {
-                return false;
-            }
-        }
+        if Self::is_exempt(&domain) { return false; }
 
         if let Some(entry) = self.history.get_mut(&domain) {
             let queue = &mut entry.resolutions;

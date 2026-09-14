@@ -381,8 +381,62 @@ class ResolvConfRepair(unittest.TestCase):
         content, _, _ = self.repair(None)
         self.assertIn('nameserver', content)
 
+    def test_build_dns_override_is_only_needed_for_internal_stubs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'resolv.conf'
+            for content, expected in [
+                ('nameserver 127.0.0.1\n', True),
+                ('nameserver 100.100.100.100\n', True),
+                ('nameserver 127.0.0.1\nnameserver 10.0.0.53\n', False),
+                ('nameserver 10.0.0.53\n', False),
+                ('# no resolver\n', True),
+            ]:
+                path.write_text(content)
+                self.assertEqual(setup.build_needs_independent_dns(path), expected)
+
+    def test_build_dns_override_restores_original_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'original-resolver'
+            target.write_text('nameserver 127.0.0.1\nsearch private.example\n')
+            resolv = root / 'resolv.conf'
+            resolv.symlink_to(target)
+            upstream = root / 'upstream-resolver'
+            upstream.write_text('nameserver 192.0.2.53\n')
+            state = root / 'state'
+            prepare = (setup.PREPARE_BUILD_DNS
+                       .replace('/etc/resolv.conf', str(resolv))
+                       .replace('/run/systemd/resolve/resolv.conf', str(upstream)))
+            restore = setup.RESTORE_BUILD_DNS.replace('/etc/resolv.conf', str(resolv))
+            first = subprocess.run(['bash', '-c', prepare, 'test', str(state)], capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertFalse(resolv.is_symlink())
+            self.assertEqual(resolv.read_text(), upstream.read_text())
+            second = subprocess.run(['bash', '-c', restore, 'test', str(state)], capture_output=True, text=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertTrue(resolv.is_symlink())
+            self.assertEqual(resolv.resolve(), target)
+            self.assertEqual(resolv.read_text(), 'nameserver 127.0.0.1\nsearch private.example\n')
+
 
 class ShellRecovery(unittest.TestCase):
+    def test_tailscale_lifecycle_only_applies_to_tailscale_addresses(self):
+        script = '''source "$1/aegis"
+for address in 100.64.0.1 100.127.255.254; do
+    AEGIS_SETUP_IP="$address" uses_tailscale || exit 10
+done
+for address in 100.63.255.254 100.128.0.1 192.168.1.10; do
+    if AEGIS_SETUP_IP="$address" uses_tailscale; then exit 11; fi
+done
+'''
+        result = subprocess.run(
+            ['bash', '-c', script, 'test', str(SOURCE)],
+            capture_output=True,
+            text=True,
+            env=dict(os.environ, NO_COLOR='1'),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def recovery(self, fail=False, incomplete=False):
         with tempfile.TemporaryDirectory() as root:
             backup=Path(root)/'dns';backup.mkdir()

@@ -75,8 +75,17 @@ fn decode_chunked(mut input: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn status_from_cli() -> Option<Vec<u8>> {
-    let output = std::process::Command::new("tailscale").args(["status", "--json"]).output().ok()?;
+async fn status_from_cli() -> Option<Vec<u8>> {
+    // A wedged tailscaled process must not leave the Devices API waiting
+    // forever. The local socket path above is preferred; this fallback is
+    // bounded because the dashboard calls it during normal refreshes.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new("tailscale")
+            .args(["status", "--json"])
+            .kill_on_drop(true)
+            .output(),
+    ).await.ok()?.ok()?;
     output.status.success().then_some(output.stdout)
 }
 
@@ -85,7 +94,7 @@ pub async fn get_online_peers() -> Vec<(String, String)> {
     if let Some(status) = status_from_localapi().await {
         return parse_peers(&status);
     }
-    let status = tokio::task::spawn_blocking(status_from_cli).await.ok().flatten();
+    let status = status_from_cli().await;
     status.map_or_else(Vec::new, |bytes| parse_peers(&bytes))
 }
 

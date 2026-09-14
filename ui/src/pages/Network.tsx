@@ -18,7 +18,7 @@ import {
   Network as NetworkIcon,
   Shield,
 } from "lucide-react";
-import { number, useApi } from "../api";
+import { number, timestamp, useApi } from "../api";
 import type { Graph, GraphNode } from "../types";
 import {
   Button,
@@ -76,7 +76,10 @@ export default function Network() {
 
   // Automatically search as the user types (with a 400ms debounce to avoid spamming the API)
   useEffect(() => {
-    const timer = setTimeout(() => setDomain(input.trim()), 400);
+    const timer = setTimeout(() => {
+      setDomain(input.trim());
+      setSelected(null);
+    }, 400);
     return () => clearTimeout(timer);
   }, [input]);
 
@@ -181,8 +184,8 @@ export default function Network() {
       // The unstyled, already-filtered edges. The inspector reads these so it
       // can never list a connection the canvas is not drawing.
       visibleEdges: edges,
-      edges: edges.map((e, i) => ({
-        id: `${e.source}-${e.target}-${i}`,
+      edges: edges.map((e) => ({
+        id: `${e.source}|${e.relation}|${e.target}`,
         source: e.source,
         target: e.target,
         label:
@@ -209,6 +212,15 @@ export default function Network() {
         (e) => e.source === selected.id || e.target === selected.id,
       )
     : [];
+  const displayTimestamp = (value: string) => {
+    const parsed = timestamp(value);
+    return Number.isNaN(parsed.getTime())
+      ? value
+      : parsed.toLocaleString([], {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
+  };
   return (
     <>
       <PageHeader
@@ -243,7 +255,10 @@ export default function Network() {
         <select
           aria-label="Relationship history"
           value={hours}
-          onChange={(e) => setHours(e.target.value)}
+          onChange={(e) => {
+            setHours(e.target.value);
+            setSelected(null);
+          }}
         >
           <option value="1">Last hour</option>
           <option value="6">Last 6 hours</option>
@@ -254,7 +269,10 @@ export default function Network() {
         <select
           aria-label="Focus device"
           value={device}
-          onChange={(e) => setDevice(e.target.value)}
+          onChange={(e) => {
+            setDevice(e.target.value);
+            setSelected(null);
+          }}
         >
           <option value="">All devices</option>
           {query.data?.nodes
@@ -394,23 +412,29 @@ export default function Network() {
                   <Badge>{connections.length} direct links</Badge>
                 </div>
                 <div className="connection-list">
-                  {connections.slice(0, 40).map((e, i) => {
+                  {connections.slice(0, 40).map((e) => {
                     const id = e.source === selected.id ? e.target : e.source;
                     const other = query.data.nodes.find((n) => n.id === id);
                     return (
                       <button
-                        key={i}
+                        key={`${e.source}|${e.relation}|${e.target}`}
                         onClick={() => setSelected(other || null)}
                       >
                         <small>{e.relation.replaceAll("_", " ")}</small>
                         <strong>{other?.label || id}</strong>
                         <span>{number(e.count)} observations</span>
                         <time>
-                          {e.first_seen} → {e.last_seen} UTC
+                          {displayTimestamp(e.first_seen)} →{" "}
+                          {displayTimestamp(e.last_seen)}
                         </time>
                       </button>
                     );
                   })}
+                  {connections.length > 40 && (
+                    <p className="note">
+                      Showing the 40 most active direct links in this panel.
+                    </p>
+                  )}
                 </div>
               </>
             ) : (

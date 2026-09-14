@@ -47,6 +47,78 @@ else
 fi
 '''
 
+# A running AegisDNS installation points the host resolver at loopback. A
+# source build must not depend on the old DNS image being able to resolve every
+# package registry needed by the new image. These scripts make that override
+# scoped and reversible, preserving a regular file or symlink exactly.
+PREPARE_BUILD_DNS = r'''
+set -eu
+state=$1
+resolv=/etc/resolv.conf
+mkdir -p "$state"
+chmod 700 "$state"
+if [ -L "$resolv" ]; then
+    printf 'symlink\n' > "$state/build-resolv.kind"
+    readlink "$resolv" > "$state/build-resolv.target"
+elif [ -e "$resolv" ]; then
+    printf 'regular\n' > "$state/build-resolv.kind"
+else
+    printf 'missing\n' > "$state/build-resolv.kind"
+fi
+if [ -e "$resolv" ]; then
+    cat "$resolv" > "$state/build-resolv.content"
+    stat -Lc %a "$resolv" > "$state/build-resolv.mode"
+fi
+tmp="$resolv.aegisdns-build.$$"
+trap 'rm -f "$tmp"' EXIT
+if [ -s /run/systemd/resolve/resolv.conf ] && grep -qs '^[[:space:]]*nameserver' /run/systemd/resolve/resolv.conf; then
+    cat /run/systemd/resolve/resolv.conf > "$tmp"
+else
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$tmp"
+fi
+chmod 644 "$tmp"
+rm -f "$resolv"
+mv "$tmp" "$resolv"
+trap - EXIT
+'''
+
+RESTORE_BUILD_DNS = r'''
+set -eu
+state=$1
+resolv=/etc/resolv.conf
+kind=$(cat "$state/build-resolv.kind")
+case "$kind" in
+    symlink)
+        target=$(cat "$state/build-resolv.target")
+        [ -n "$target" ] && [ "${target#*$'\n'}" = "$target" ]
+        rm -f "$resolv"
+        ln -s -- "$target" "$resolv"
+        ;;
+    regular)
+        mode=$(cat "$state/build-resolv.mode")
+        case "$mode" in (*[!0-7]*|'') exit 1;; esac
+        install -m "$mode" "$state/build-resolv.content" "$resolv"
+        ;;
+    missing) rm -f "$resolv" ;;
+    *) exit 1 ;;
+esac
+'''
+
+
+def build_needs_independent_dns(path=Path('/etc/resolv.conf')):
+    try:
+        nameservers = [
+            line.split()[1]
+            for line in path.read_text(encoding='utf-8').splitlines()
+            if line.strip().startswith('nameserver ') and len(line.split()) >= 2
+        ]
+    except OSError:
+        return True
+    if not nameservers:
+        return True
+    unusable = {'127.0.0.1', '::1', '100.100.100.100'}
+    return all(server in unusable for server in nameservers)
+
 
 class SetupError(Exception):
     pass
@@ -594,27 +666,31 @@ class Setup:
         self.ui.step(4, 6, 'Build AegisDNS')
         self.ui.detail('The first build may take a few minutes.')
         ts_was_true = False
+        build_dns_changed = False
         if shutil.which('tailscale'):
             prefs = self.runner.run(['tailscale', 'debug', 'prefs'], capture=True, check=False) or ''
             if '"CorpDNS": true' in prefs:
                 ts_was_true = True
             if ts_was_true:
                 self.sudo_run('tailscale', 'set', '--accept-dns=false', timeout=15)
-            # We must forcefully override DNS to 8.8.8.8 so Docker can reach the internet during the build.
-            # Using systemd-resolved often loops back to 127.0.0.1 (AegisDNS), causing a deadlock if 
-            # AegisDNS blocks crates.io.
-            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && echo "nameserver 8.8.8.8" > /etc/resolv.conf', timeout=15)
-        self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
-                        timeout=self.args.build_timeout, activity='Building container images')
-        
-        # Restore systemd-resolved after build
-        if not WINDOWS and shutil.which('systemctl'):
-            self.sudo_run('bash', '-c', 'rm -f /etc/resolv.conf && (test -f /run/systemd/resolve/stub-resolv.conf && ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || echo "nameserver 8.8.8.8" > /etc/resolv.conf)', timeout=15)
+                self.sudo_run('bash', '-c', REPAIR_RESOLV_CONF, timeout=15)
+        if not WINDOWS and build_needs_independent_dns():
+            self.sudo_run('bash', '-c', PREPARE_BUILD_DNS, 'aegisdns-build-dns', str(self.backup), timeout=15)
+            build_dns_changed = True
+        try:
+            self.runner.run(self.compose + ['build'] + (['--no-cache'] if self.args.rebuild else []),
+                            timeout=self.args.build_timeout, activity='Building container images')
+        finally:
+            try:
+                if build_dns_changed:
+                    self.sudo_run('bash', '-c', RESTORE_BUILD_DNS, 'aegisdns-build-dns', str(self.backup), timeout=15)
+            finally:
+                # A failed or interrupted build must not leave Tailscale DNS disabled.
+                if ts_was_true:
+                    self.sudo_run('tailscale', 'set', '--accept-dns=true', timeout=15)
 
         self.runner.run(self.compose + ['run', '--rm', '--no-deps', '--user', '10001:10001', '--entrypoint', '/bin/sh', 'aegisdns', '-c', 'test -r /app/config.json && test -r /var/lib/aegisdns/openroot.json'],
                         timeout=60, activity='Verifying configuration access')
-        if ts_was_true:
-            self.sudo_run('tailscale', 'set', '--accept-dns=true', timeout=15)
         self.ui.done('Images and configuration verified')
         self.ui.step(5, 6, 'Install the command')
         if not WINDOWS:

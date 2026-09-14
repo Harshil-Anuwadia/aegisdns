@@ -415,13 +415,16 @@ impl AnalyticsDb {
                     ORDER BY observed_at DESC LIMIT ?2
                  ), matched AS (
                     SELECT DISTINCT query_domain FROM recent
-                    WHERE query_domain LIKE '%' || ?3 || '%' OR source LIKE '%' || ?3 || '%' OR target LIKE '%' || ?3 || '%'
+                    WHERE instr(lower(query_domain), ?3) > 0
+                       OR instr(lower(COALESCE(source, '')), ?3) > 0
+                       OR instr(lower(target), ?3) > 0
                  )
                  SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
                  FROM recent WHERE query_domain IN (SELECT query_domain FROM matched)
                  GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind
                  HAVING COUNT(*) >= ?4
-                 ORDER BY CASE WHEN COALESCE(source,query_domain) LIKE '%' || ?3 || '%' OR target LIKE '%' || ?3 || '%' THEN 0 ELSE 1 END,
+                 ORDER BY CASE WHEN instr(lower(COALESCE(source,query_domain)), ?3) > 0
+                                      OR instr(lower(target), ?3) > 0 THEN 0 ELSE 1 END,
                           COUNT(*) DESC, MAX(observed_at) DESC LIMIT ?5"
             } else {
                 "WITH recent AS (
@@ -647,16 +650,16 @@ impl AnalyticsDb {
                     conn.execute("DELETE FROM dns_relationships", [])?;
                 }
                 "1h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-1 hour')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-1 hour')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 hour')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 hour')", [])?;
                 }
                 "24h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-1 day')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-1 day')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 day')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 day')", [])?;
                 }
                 "7d" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp < datetime('now', '-7 days')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at < datetime('now', '-7 days')", [])?;
+                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-7 days')", [])?;
+                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-7 days')", [])?;
                 }
                 // An unrecognised timeframe used to be ignored while the API
                 // still answered "Logs deleted successfully", so a typo looked
@@ -1197,5 +1200,42 @@ pub struct CustomAction {
         db.delete_logs("all").await.unwrap();
         assert!(db.relationship_graph(None,24).await.unwrap().edges.is_empty());
         drop(db);let _=std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn graph_partial_search_treats_sql_wildcards_as_literal_text() {
+        let path=test_path("literal-search");
+        let db=AnalyticsDb::new(path.clone()).unwrap();
+        db.record_query_with_relationships("service.example",false,1,"192.0.2.10",vec![
+            RelationshipObservation{source:None,source_kind:None,relation:"requested_by".into(),target:"192.0.2.10".into(),target_kind:"device".into()},
+        ]).await.unwrap();
+        db.flush().await.unwrap();
+
+        assert!(!db.relationship_graph(Some("service"),24).await.unwrap().edges.is_empty());
+        assert!(db.relationship_graph(Some("%"),24).await.unwrap().edges.is_empty());
+        assert!(db.relationship_graph(Some("_"),24).await.unwrap().edges.is_empty());
+        drop(db);let _=std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn deleting_last_hour_keeps_older_history() {
+        let path=test_path("delete-window");
+        let db=AnalyticsDb::new(path.clone()).unwrap();
+        {
+            let conn=db.conn.lock().unwrap();
+            conn.execute("INSERT INTO queries(domain,timestamp,status,latency_ms,client_ip) VALUES('recent.example',datetime('now','-10 minutes'),'allowed',1,'192.0.2.1')",[]).unwrap();
+            conn.execute("INSERT INTO queries(domain,timestamp,status,latency_ms,client_ip) VALUES('older.example',datetime('now','-2 hours'),'allowed',1,'192.0.2.1')",[]).unwrap();
+            conn.execute("INSERT INTO dns_relationships(observed_at,query_domain,relation,target,target_kind,client_ip) VALUES(datetime('now','-10 minutes'),'recent.example','requested_by','192.0.2.1','device','192.0.2.1')",[]).unwrap();
+            conn.execute("INSERT INTO dns_relationships(observed_at,query_domain,relation,target,target_kind,client_ip) VALUES(datetime('now','-2 hours'),'older.example','requested_by','192.0.2.1','device','192.0.2.1')",[]).unwrap();
+        }
+
+        db.delete_logs("1h").await.unwrap();
+        let conn=db.conn.lock().unwrap();
+        let recent_queries:i64=conn.query_row("SELECT COUNT(*) FROM queries WHERE domain='recent.example'",[],|row|row.get(0)).unwrap();
+        let older_queries:i64=conn.query_row("SELECT COUNT(*) FROM queries WHERE domain='older.example'",[],|row|row.get(0)).unwrap();
+        let recent_edges:i64=conn.query_row("SELECT COUNT(*) FROM dns_relationships WHERE query_domain='recent.example'",[],|row|row.get(0)).unwrap();
+        let older_edges:i64=conn.query_row("SELECT COUNT(*) FROM dns_relationships WHERE query_domain='older.example'",[],|row|row.get(0)).unwrap();
+        assert_eq!((recent_queries,older_queries,recent_edges,older_edges),(0,1,0,1));
+        drop(conn);drop(db);let _=std::fs::remove_file(path);
     }
 }

@@ -348,7 +348,12 @@ async fn post_blocklist(State(state): State<AppState>, Json(req): Json<Blocklist
     if req.name.trim().is_empty() || req.name.len()>128 || !req.source_url.starts_with("https://") {
         return Json(ActionResponse{success:false,message:"Provide a name and an HTTPS blocklist URL".into()});
     }
-    let _update=blocklist::UPDATE_LOCK.lock().await;
+    let Ok(_update)=tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        blocklist::UPDATE_LOCK.lock(),
+    ).await else {
+        return Json(ActionResponse{success:false,message:"Another blocklist update is already running".into()});
+    };
     let mut lists=state.blocklist.read().await.get_lists();
     if lists.iter().any(|l|l.name==req.name || l.source_url==req.source_url) {
         return Json(ActionResponse{success:false,message:"Blocklist already exists".into()});
@@ -358,14 +363,26 @@ async fn post_blocklist(State(state): State<AppState>, Json(req): Json<Blocklist
 }
 
 async fn publish_lists(state:&AppState, lists:Vec<blocklist::ListMetadata>) -> Json<ActionResponse> {
-    match BlocklistManager::download_lists(lists).await {
-        Ok((lists,domains,exceptions))=>{state.blocklist.write().await.apply_update(lists,domains,exceptions); Json(ActionResponse{success:true,message:"Blocklist snapshot updated".into()})}
-        Err(e)=>Json(ActionResponse{success:false,message:format!("Existing protection retained: {}",e)}),
+    // The dashboard aborts blocklist requests after 180 seconds. Stop the
+    // server-side operation first so the UI can never report a timeout while
+    // an unseen update continues in the background.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(170),
+        BlocklistManager::download_lists(lists),
+    ).await {
+        Ok(Ok((lists,domains,exceptions)))=>{state.blocklist.write().await.apply_update(lists,domains,exceptions); Json(ActionResponse{success:true,message:"Blocklist snapshot updated".into()})}
+        Ok(Err(e))=>Json(ActionResponse{success:false,message:format!("Existing protection retained: {}",e)}),
+        Err(_)=>Json(ActionResponse{success:false,message:"Blocklist update exceeded 170 seconds; existing protection was retained".into()}),
     }
 }
 
 async fn delete_blocklist(State(state): State<AppState>, Path(name): Path<String>) -> Json<ActionResponse> {
-    let _update=blocklist::UPDATE_LOCK.lock().await;
+    let Ok(_update)=tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        blocklist::UPDATE_LOCK.lock(),
+    ).await else {
+        return Json(ActionResponse{success:false,message:"Another blocklist update is already running".into()});
+    };
     let mut lists=state.blocklist.read().await.get_lists();
     let Some(list)=lists.iter_mut().find(|l|l.name==name) else {return Json(ActionResponse{success:false,message:"List not found".into()});};
     // Persist a disabled marker for local files so scanning does not silently re-add them.
@@ -982,7 +999,11 @@ const FAVICON_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 
 
 static FAVICON_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>>> =
     std::sync::OnceLock::new();
-static FAVICON_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+type FaviconClientEntry = (reqwest::Client, Instant);
+static FAVICON_CLIENT: std::sync::OnceLock<std::sync::Mutex<Option<FaviconClientEntry>>> =
+    std::sync::OnceLock::new();
+const FAVICON_PROVIDER: &str = "www.google.com";
+const FAVICON_CLIENT_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn favicon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, FaviconEntry>> {
     FAVICON_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -1009,14 +1030,70 @@ fn evict_favicon_entry(cache: &mut std::collections::HashMap<String, FaviconEntr
     }
 }
 
-fn favicon_client() -> &'static reqwest::Client {
-    FAVICON_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .user_agent("AegisDNS favicon proxy")
-            .build()
-            .expect("favicon HTTP client configuration is valid")
-    })
+fn favicon_client_cache() -> &'static std::sync::Mutex<Option<FaviconClientEntry>> {
+    FAVICON_CLIENT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Resolve the fixed favicon provider through Unbound directly. Using the
+/// process resolver here would send `www.google.com` back through AegisDNS
+/// because the installed host points /etc/resolv.conf at 127.0.0.1, creating
+/// a misleading dashboard query for every uncached icon.
+async fn resolve_favicon_provider() -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    resolve_favicon_provider_at(resolver::proxy_upstream_addr()).await
+}
+
+async fn resolve_favicon_provider_at(upstream: &str) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    use hickory_proto::{op::{Message, Query, ResponseCode}, rr::{Name, RData, RecordType}};
+
+    let mut query = Message::query();
+    query.metadata.recursion_desired = true;
+    query.add_query(Query::query(Name::from_ascii(FAVICON_PROVIDER)?, RecordType::A));
+    let bytes = query.to_vec()?;
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(upstream).await?;
+    socket.send(&bytes).await?;
+    let mut response_bytes = vec![0_u8; 4096];
+    let size = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        socket.recv(&mut response_bytes),
+    ).await??;
+    let response = Message::from_vec(&response_bytes[..size])?;
+    anyhow::ensure!(
+        config::dns::valid_response(&query, &response)
+            && response.metadata.response_code == ResponseCode::NoError,
+        "invalid favicon provider DNS response"
+    );
+    let addresses: Vec<_> = response.answers.iter().chain(&response.additionals)
+        .filter_map(|record| match record.data {
+            RData::A(ip) => Some(std::net::SocketAddr::new(ip.0.into(), 443)),
+            _ => None,
+        })
+        .filter(|address| !config::is_internal_address(address.ip()))
+        .collect();
+    anyhow::ensure!(!addresses.is_empty(), "favicon provider has no public IPv4 address");
+    Ok(addresses)
+}
+
+async fn favicon_client() -> anyhow::Result<reqwest::Client> {
+    if let Ok(cache) = favicon_client_cache().lock() {
+        if let Some((client, stored)) = cache.as_ref() {
+            if stored.elapsed() < FAVICON_CLIENT_TTL {
+                return Ok(client.clone());
+            }
+        }
+    }
+    let addresses = resolve_favicon_provider().await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(FAVICON_PROVIDER, &addresses)
+        .user_agent("AegisDNS favicon proxy")
+        .build()?;
+    if let Ok(mut cache) = favicon_client_cache().lock() {
+        *cache = Some((client.clone(), Instant::now()));
+    }
+    Ok(client)
 }
 
 fn valid_favicon_domain(domain: &str) -> bool {
@@ -1090,8 +1167,9 @@ pub async fn get_favicon(
     }
 
     // Fetch from upstream — server-side only, browser never contacts Google.
-    let url = format!("https://www.google.com/s2/favicons?domain={}&sz=32", domain);
-    if let Ok(mut resp) = favicon_client().get(url).send().await {
+    let url = format!("https://{FAVICON_PROVIDER}/s2/favicons?domain={}&sz=32", domain);
+    if let Ok(client) = favicon_client().await {
+        if let Ok(mut resp) = client.get(url).send().await {
         if resp.status().is_success()
             && resp.content_length().is_none_or(|length| length <= FAVICON_MAX_BYTES as u64)
         {
@@ -1102,11 +1180,17 @@ pub async fn get_favicon(
                 .and_then(allowed_favicon_content_type);
             if let Some(content_type) = content_type {
                 let mut data = Vec::new();
-                while let Ok(Some(chunk)) = resp.chunk().await {
-                    if data.len().saturating_add(chunk.len()) > FAVICON_MAX_BYTES {
-                        return no_favicon();
+                loop {
+                    match resp.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if data.len().saturating_add(chunk.len()) > FAVICON_MAX_BYTES {
+                                return no_favicon();
+                            }
+                            data.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(_) => return no_favicon(),
                     }
-                    data.extend_from_slice(&chunk);
                 }
                 // Only cache if it looks like a real icon (> 64 bytes).
                 if data.len() > 64 {
@@ -1123,6 +1207,7 @@ pub async fn get_favicon(
                         .unwrap_or_else(|_| no_favicon());
                 }
             }
+        }
         }
     }
 
@@ -1447,6 +1532,30 @@ fn csv_cell(value:&str)->String {
         assert_eq!(allowed_favicon_content_type("IMAGE/PNG"), Some("image/png"));
         assert_eq!(allowed_favicon_content_type("text/html"), None);
         assert_eq!(allowed_favicon_content_type("application/javascript"), None);
+    }
+
+    #[tokio::test]
+    async fn favicon_provider_resolution_uses_the_explicit_dns_server() {
+        use hickory_proto::{op::Message, rr::{RData, Record, rdata::A}};
+
+        let server=tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address=server.local_addr().unwrap();
+        let responder=tokio::spawn(async move {
+            let mut bytes=[0_u8;4096];
+            let (size,client)=server.recv_from(&mut bytes).await.unwrap();
+            let query=Message::from_vec(&bytes[..size]).unwrap();
+            let mut response=config::dns::reply(&query,hickory_proto::op::ResponseCode::NoError);
+            response.add_answer(Record::from_rdata(
+                query.queries[0].name.clone(),
+                60,
+                RData::A(A("8.8.8.8".parse().unwrap())),
+            ));
+            server.send_to(&response.to_vec().unwrap(),client).await.unwrap();
+        });
+
+        let resolved=resolve_favicon_provider_at(&address.to_string()).await.unwrap();
+        assert_eq!(resolved,vec!["8.8.8.8:443".parse().unwrap()]);
+        responder.await.unwrap();
     }
 }
 

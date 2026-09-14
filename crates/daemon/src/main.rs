@@ -97,10 +97,15 @@ async fn main() -> anyhow::Result<()> {
     let action_host_ip=host_ip.clone();
     services.spawn(async move {
         let mut last_error = String::new();
+        let mut repeated = 0_u32;
         loop {
             if let Err(e) = web::start_action_server(action_db.clone(), &action_host_ip).await {
                 let err_str = e.to_string();
-                if err_str != last_error {
+                repeated = if err_str == last_error { repeated.saturating_add(1) } else { 0 };
+                // Report changes immediately and repeat an unchanged failure
+                // every five minutes. Silencing it forever made a broken
+                // action listener too easy to miss.
+                if err_str != last_error || repeated % 60 == 0 {
                     if err_str.contains("os error 99") {
                         tracing::warn!("Action API waiting for IP {} to become available...", action_host_ip);
                     } else {
@@ -110,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 last_error.clear();
+                repeated = 0;
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }

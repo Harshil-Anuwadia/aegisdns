@@ -97,7 +97,7 @@ impl BlocklistManager {
                     }
                 }
                 Err(e) => match old.sources.get(&list.source_url) {
-                    Some(previous) => { tracing::error!("List {} failed: {:?}",list.name,e); previous.clone() }
+                    Some(previous) => { tracing::warn!("List {} failed: {}; keeping previous rules",list.name,e); previous.clone() }
                     None => { tracing::error!("List {} failed entirely: {:?}",list.name,e); return Err(e.context(format!("No last-known-good rules for {}",list.name))); },
                 }
             };
@@ -152,7 +152,9 @@ async fn fetch_list(source:&str)->anyhow::Result<String> {
         addrs.clone()
     };
     // Pin checked addresses. Redirects are rejected so a public URL cannot redirect into the LAN.
-    let client=reqwest::Client::builder().no_proxy().resolve_to_addrs(host,&connect_addrs).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(300)).build()?;
+    // Finish before the dashboard's 180-second request deadline so it cannot
+    // report failure while the server continues the same download.
+    let client=reqwest::Client::builder().no_proxy().resolve_to_addrs(host,&connect_addrs).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(150)).build()?;
     let mut response=client.get(url).send().await?.error_for_status()?;
     anyhow::ensure!(response.status().is_success(),"Blocklist redirect rejected");
     anyhow::ensure!(response.content_length().unwrap_or(0)<=64*1024*1024,"Blocklist too large");
