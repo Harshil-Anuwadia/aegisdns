@@ -25,7 +25,7 @@ tokio = { version = "1.32", features = ["full"] }
 moka = { version = "0.12", features = ["future"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-toml = "0.8"
+toml = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "stream"] }
 ipnet = "2.12"
 sha2 = "0.10"
