@@ -14,7 +14,7 @@
   <a href="#features">Features</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="TROUBLESHOOTING.md">Troubleshooting</a> ·
-  <a href="#contributing">Contribute</a> ·
+  <a href=".github/CONTRIBUTING.md">Contribute</a> ·
   <a href="https://github.com/sponsors/Harshil-Anuwadia">Sponsor</a>
 </p>
 
@@ -328,20 +328,13 @@ For an installer-managed checkout, `aegis update` pulls source changes, rebuilds
 
 ## Contributing
 
-Bug reports, tests, documentation, and code contributions are welcome.
+Bug reports, tests, documentation, and focused code contributions are welcome. Read the [contribution guide](.github/CONTRIBUTING.md), [development guide](docs/DEVELOPMENT.md), and [architecture overview](docs/ARCHITECTURE.md) before making a substantial change.
 
-1. Check [existing issues](https://github.com/Harshil-Anuwadia/aegisdns/issues) before opening a report.
-2. For bugs, include the revision, host environment, deployment method, reproduction steps, and expected versus actual behavior. Remove credentials and private DNS data from logs.
-3. Discuss substantial behavior changes before starting a large pull request.
-4. Keep changes focused, run the relevant backend or frontend checks, and document any changed configuration or behavior.
-
-AI-assisted contributions are welcome under the same review standard: understand the change, verify its behavior, and explain its limitations.
-
-For security vulnerabilities, use the repository's **Security** tab to check available private reporting options. Avoid disclosing exploit details or sensitive information in a public issue.
+Report vulnerabilities privately according to the [security policy](.github/SECURITY.md). Do not publish exploit details or private DNS data in an issue.
 
 ## Support and funding
 
-Start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for setup and operational issues. Community support is provided through [GitHub issues](https://github.com/Harshil-Anuwadia/aegisdns/issues).
+Start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for setup and operational issues. The [support guide](.github/SUPPORT.md) explains where and how to report problems.
 
 AegisDNS is maintained by Harshil Anuwadia. [GitHub sponsorship](https://github.com/sponsors/Harshil-Anuwadia) is optional and supports development and maintenance. Organizations can also [fund public improvements or discuss deployment assistance](SPONSORSHIP.md).
 
