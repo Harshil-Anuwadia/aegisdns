@@ -77,11 +77,14 @@ export default function Network() {
   // Automatically search as the user types (with a 400ms debounce to avoid spamming the API)
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDomain(input.trim());
-      setSelected(null);
+      const nextDomain = input.trim();
+      if (nextDomain !== domain) {
+        setDomain(nextDomain);
+        setSelected(null);
+      }
     }, 400);
     return () => clearTimeout(timer);
-  }, [input]);
+  }, [domain, input]);
 
   const query = useApi<Graph>(
     `/graph?hours=${hours}&limit=${limit}&min_count=${minCount}&domain=${encodeURIComponent(domain)}`,

@@ -21,7 +21,7 @@ ui/playwright-report/
 # Editor directories and files
 .vscode
 .idea
-.obsidian/
+.obsidian*/
 *.suo
 *.ntvs*
 *.njsproj
