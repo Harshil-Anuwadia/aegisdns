@@ -73,6 +73,13 @@ export default function Network() {
     document.addEventListener("fullscreenchange", handler);
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
+
+  // Automatically search as the user types (with a 400ms debounce to avoid spamming the API)
+  useEffect(() => {
+    const timer = setTimeout(() => setDomain(input.trim()), 400);
+    return () => clearTimeout(timer);
+  }, [input]);
+
   const query = useApi<Graph>(
     `/graph?hours=${hours}&limit=${limit}&min_count=${minCount}&domain=${encodeURIComponent(domain)}`,
     15000,

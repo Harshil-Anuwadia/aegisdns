@@ -415,13 +415,13 @@ impl AnalyticsDb {
                     ORDER BY observed_at DESC LIMIT ?2
                  ), matched AS (
                     SELECT DISTINCT query_domain FROM recent
-                    WHERE query_domain = ?3 OR source = ?3 OR target = ?3
+                    WHERE query_domain LIKE '%' || ?3 || '%' OR source LIKE '%' || ?3 || '%' OR target LIKE '%' || ?3 || '%'
                  )
                  SELECT COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind,COUNT(*),MIN(observed_at),MAX(observed_at)
                  FROM recent WHERE query_domain IN (SELECT query_domain FROM matched)
                  GROUP BY COALESCE(source,query_domain),COALESCE(source_kind,'domain'),relation,target,target_kind
                  HAVING COUNT(*) >= ?4
-                 ORDER BY CASE WHEN COALESCE(source,query_domain) = ?3 OR target = ?3 THEN 0 ELSE 1 END,
+                 ORDER BY CASE WHEN COALESCE(source,query_domain) LIKE '%' || ?3 || '%' OR target LIKE '%' || ?3 || '%' THEN 0 ELSE 1 END,
                           COUNT(*) DESC, MAX(observed_at) DESC LIMIT ?5"
             } else {
                 "WITH recent AS (
