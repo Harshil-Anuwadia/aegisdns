@@ -66,9 +66,17 @@ impl PrivacyGuard{
         let budget=cfg.device_budgets.get(device).copied().unwrap_or(cfg.default_budget);
         drop(cfg);
         let day=current_day();
-        let live_score=self.activity.lock().ok().and_then(|mut all|{let state=all.entry(device.into()).or_default();state.reset_if_needed(day);Some(state.score())}).unwrap_or(0);
-        let baseline_score=self.baseline.lock().ok().and_then(|scores|scores.get(device).copied()).filter(|(saved_day,_)|*saved_day==day).map(|(_,score)|score).unwrap_or(0);
-        live_score.max(baseline_score)>=budget
+        let live_score={
+            let mut all=self.activity.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+            let state=all.entry(device.into()).or_default();state.reset_if_needed(day);state.score()
+        };
+        let baseline_score=self.baseline.lock().unwrap_or_else(|poisoned|poisoned.into_inner())
+            .get(device).copied().filter(|(saved_day,_)|*saved_day==day).map(|(_,score)|score).unwrap_or(0);
+        // `baseline_score` represents activity already persisted before this
+        // process started; `live_score` contains only observations since then.
+        // Taking max gave every restart a second budget. Conservatively combine
+        // both independent portions and cap at the score's public range.
+        baseline_score.saturating_add(live_score).min(100)>=budget
     }
     pub fn record(&self,device:&str,domain:&str,relationships:&[analytics::RelationshipObservation]){
         let day=current_day();let hour=(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()/3600)%24;
@@ -107,5 +115,26 @@ fn current_day()->u64{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_def
         }]);
         assert!(guard.should_block("192.0.2.10","stats.doubleclick.net").await);
         assert!(!guard.should_block("192.0.2.10","example.com").await);
+    }
+
+    #[tokio::test]
+    async fn activity_after_restart_spends_the_remaining_budget(){
+        let guard=PrivacyGuard{
+            config:tokio::sync::RwLock::new(PrivacyConfig{enabled:true,default_budget:40,device_budgets:HashMap::new()}),
+            activity:Mutex::new(HashMap::new()),
+            baseline:Mutex::new(HashMap::new()),
+        };
+        guard.seed(&[analytics::PrivacySummary{
+            device:"192.0.2.11".into(),total_queries:10,unique_domains:7,blocked_queries:0,
+            tracking_companies:1,advertising_identifiers:0,applications:1,network_spread:1,
+            country_spread:0,quiet_hour_queries:0,score:30,
+        }]);
+        let relationships=vec![analytics::RelationshipObservation{
+            source:None,source_kind:None,relation:"contacts".into(),
+            target:"Google".into(),target_kind:"company".into(),
+        }];
+        guard.record("192.0.2.11","stats.doubleclick.net",&relationships);
+        assert!(guard.should_block("192.0.2.11","ads.doubleclick.net").await,
+            "new activity must be added to the persisted daily score");
     }
 }

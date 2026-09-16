@@ -205,17 +205,19 @@ Changes take effect when the daemon restarts (`aegis restart`).
 | Setting | Purpose |
 | --- | --- |
 | `AEGIS_CONFIG` | Absolute path to `config.json`. Overrides the search order above. The supplied Compose file sets it to `/app/config.json`. |
-| `AEGIS_HOST_IP` | Host IPv4 address used for custom-action DNS answers and the default action listener. Set by the installer or in `.env`. |
+| `AEGIS_HOST_IP` | Host IPv4 address used for custom-action DNS answers. A Tailscale address is also used by the action listener; an ordinary LAN address leaves that listener on loopback. Set by the installer or in `.env`. |
 | `AEGIS_ADMIN_PASSWORD` | Optional admin password override, 16–256 characters. Otherwise, a generated password is persisted in the data directory. |
 | `AEGIS_FAVICON_REMOTE_LOOKUP` | Disabled by default. Set to `true` only if you accept that Google’s favicon service receives the domain names displayed in the dashboard. |
 | `TZ` | Server timezone for schedules; the supplied Compose default is `UTC`. Daily analytics and privacy budgets use UTC. |
-| `AEGIS_ACTION_EXECUTABLES` | Colon-separated absolute executable paths permitted for shell-type actions. Empty by default. |
+| `AEGIS_ACTION_EXECUTABLES` | Colon-separated absolute executable paths permitted for trigger-only executable actions. Arguments are fixed by the administrator; request placeholders are rejected. Empty by default. |
+| `AEGIS_ACTION_LISTEN` | Optional action-listener address. Loopback and Tailscale addresses are accepted by default. Use a TLS proxy for other remote access. |
+| `AEGIS_ACTION_ALLOW_INSECURE_LAN` | Explicitly permits a plaintext action listener on a private LAN address. Disabled by default because bearer tokens would otherwise cross the LAN unencrypted. |
 | `AEGIS_IP_METADATA` | Optional path to a local CIDR/ASN/country metadata file. Defaults to `ip-metadata.csv` in the data directory. |
 | `AEGIS_DNS_LISTEN` | Comma-separated DNS listen addresses. Defaults to `0.0.0.0:53,[::]:53`. |
 | `AEGIS_WEB_LISTEN` | Dashboard listen address. Defaults to `127.0.0.1:5380`; it is deliberately loopback-only. |
 | `AEGIS_TELEGRAM_ADDR` | Overrides the pinned `host:port` used to reach the Telegram Bot API. Only needed if Telegram renumbers or you route through an egress proxy. |
 
-The supplied Compose file forwards `AEGIS_CONFIG`, `AEGIS_HOST_IP`, `AEGIS_ADMIN_PASSWORD`, and `TZ`. To use another daemon environment setting, explicitly add it to the service's `environment` mapping in a Compose override and mount any required files. Adding a variable to `.env` alone does not pass it into the container.
+The supplied Compose file forwards `AEGIS_CONFIG`, `AEGIS_HOST_IP`, `AEGIS_ADMIN_PASSWORD`, `AEGIS_FAVICON_REMOTE_LOOKUP`, `AEGIS_ACTION_LISTEN`, `AEGIS_ACTION_ALLOW_INSECURE_LAN`, and `TZ`. To use another daemon environment setting, explicitly add it to the service's `environment` mapping in a Compose override and mount any required files. Adding a variable to `.env` alone does not pass it into the container.
 
 ### Upstream resolution
 
@@ -263,7 +265,7 @@ The score is a **DNS exposure estimate**, not a privacy guarantee. Company and a
 - **Local analysis:** policy evaluation, risk calculations, and query storage run on your host. DNS resolution still contacts authoritative servers or configured forwarders. Blocklist updates and enabled integrations, including Telegram and webhooks, make their own outbound requests.
 - **Protected administration:** the dashboard and management API require HTTP Basic authentication. The admin listener binds to loopback by default. Use an SSH tunnel or a TLS reverse proxy for remote administration.
 - **Request protection:** state-changing API requests require `X-Aegis-Request: 1`; cross-site administration is rejected.
-- **Separate action authentication:** custom endpoints require an authenticated POST. Bearer tokens are stored as hashes. Shell-type actions require an approved executable and a JSON argument array; they do not run arbitrary shell strings. Use TLS when carrying credentials across an untrusted network.
+- **Separate action authentication:** custom endpoints require an authenticated POST. Bearer tokens are stored as hashes. Executable actions use an approved absolute path and administrator-defined fixed arguments; request values are never interpreted as command input. The listener defaults to loopback or a detected Tailscale address and requires an explicit override for plaintext private-LAN use.
 - **Container boundaries:** the supplied deployment uses read-only root filesystems, writable data volumes, and restricted capabilities. The entrypoint performs ownership setup before dropping privileges for the daemon.
 - **Bounded retention:** query and relationship records are pruned after 30 days and also subject to row caps. Retained history can therefore be shorter on busy installations. The dashboard supports explicit history deletion and export.
 

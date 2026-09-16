@@ -18,6 +18,8 @@ services:
       AEGIS_ADMIN_PASSWORD: ${AEGIS_ADMIN_PASSWORD:-}
       # Disabled by default: remote favicon services learn requested domains.
       AEGIS_FAVICON_REMOTE_LOOKUP: ${AEGIS_FAVICON_REMOTE_LOOKUP:-false}
+      AEGIS_ACTION_LISTEN: ${AEGIS_ACTION_LISTEN:-}
+      AEGIS_ACTION_ALLOW_INSECURE_LAN: ${AEGIS_ACTION_ALLOW_INSECURE_LAN:-false}
       TZ: ${TZ:-UTC}
     volumes:
       - aegisdns_data:/var/lib/aegisdns

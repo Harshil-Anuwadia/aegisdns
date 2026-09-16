@@ -66,8 +66,8 @@ const TELEGRAM_API_ADDR: &str = "149.154.167.220:443";
 ///
 /// Built once and reused: a `reqwest::Client` owns a connection pool, and
 /// constructing a new one per request threw away every pooled TLS session.
-pub fn build_telegram_client() -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+pub fn build_telegram_client() -> Result<reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         let configured = std::env::var("AEGIS_TELEGRAM_ADDR").unwrap_or_default();
         let addr = if configured.trim().is_empty() { TELEGRAM_API_ADDR } else { configured.trim() };
@@ -83,12 +83,7 @@ pub fn build_telegram_client() -> reqwest::Client {
             Err(e) => warn!("Ignoring invalid Telegram API address {addr:?} ({e}); using DNS resolution"),
         }
 
-        builder.build().unwrap_or_else(|e| {
-            // The configured timeouts are lost in this path, so say so rather
-            // than silently degrading to an unbounded default client.
-            warn!("Falling back to a default HTTP client for Telegram: {e}");
-            reqwest::Client::new()
-        })
+        builder.build().map_err(|e|format!("Failed to build bounded Telegram client: {e}"))
     })
     .clone()
 }
@@ -133,7 +128,7 @@ fn redact_token(text: &str, token: &str) -> String {
 
 pub async fn send_message(cfg: &TelegramConfig, message: &str) -> Result<(), String> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", cfg.bot_token);
-    let response = build_telegram_client()
+    let response = build_telegram_client()?
         .post(&url)
         .json(&serde_json::json!({
             "chat_id": cfg.chat_id,
@@ -154,7 +149,7 @@ pub async fn send_message(cfg: &TelegramConfig, message: &str) -> Result<(), Str
 /// Done server-side to avoid browser CORS restrictions on api.telegram.org.
 pub async fn proxy_get_updates(token: &str) -> Result<serde_json::Value, String> {
     let url    = format!("https://api.telegram.org/bot{}/getUpdates", token);
-    let client = build_telegram_client();
+    let client = build_telegram_client()?;
     match client.get(&url).send().await {
         Ok(resp) => resp.json::<serde_json::Value>().await
             .map_err(|e| format!("Failed to parse Telegram response: {}", redact_token(&e.to_string(), token))),

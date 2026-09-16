@@ -358,9 +358,10 @@ impl AnalyticsDb {
     const MAX_RELATIONSHIP_ROWS: i64 = 2_000_000;
 
     pub fn cleanup_old_queries(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx=conn.transaction()?;
         // Time-based TTL: drop anything older than the retention window.
-        conn.execute(
+        tx.execute(
             "DELETE FROM queries WHERE timestamp < datetime('now', ?1)",
             [Self::QUERY_RETENTION_DAYS],
         )?;
@@ -371,14 +372,14 @@ impl AnalyticsDb {
         // `ORDER BY id DESC LIMIT 1 OFFSET n`, which made SQLite walk n rows of
         // the index on every run. `id` is the INTEGER PRIMARY KEY, so both the
         // max lookup and the ranged delete use it directly.
-        Self::trim_to_row_cap(&conn, "queries", Self::MAX_QUERY_ROWS)?;
+        Self::trim_to_row_cap(&tx, "queries", Self::MAX_QUERY_ROWS)?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM dns_relationships WHERE observed_at < datetime('now', ?1)",
             [Self::QUERY_RETENTION_DAYS],
         )?;
-        Self::trim_to_row_cap(&conn, "dns_relationships", Self::MAX_RELATIONSHIP_ROWS)?;
-
+        Self::trim_to_row_cap(&tx, "dns_relationships", Self::MAX_RELATIONSHIP_ROWS)?;
+        tx.commit()?;
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
@@ -475,23 +476,41 @@ impl AnalyticsDb {
         tokio::task::spawn_blocking(move ||->anyhow::Result<Vec<PrivacySummary>> {
             let conn=Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-            let mut stmt=conn.prepare("SELECT client_ip,COUNT(*),COUNT(DISTINCT domain),SUM(status='blocked'),SUM(CAST(strftime('%H',timestamp) AS INTEGER)<6) FROM queries WHERE timestamp>=datetime('now','start of day') AND client_ip!='' GROUP BY client_ip ORDER BY COUNT(*) DESC")?;
-            let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,row_u64(r,1)?,row_u64(r,2)?,row_u64(r,3)?,row_u64(r,4)?)))?;
+            // Aggregate each high-volume table once. The previous version ran
+            // five extra COUNT(DISTINCT ...) queries per device, which became
+            // an N+1 latency spike on networks with many observed clients.
+            let mut stmt=conn.prepare(
+                "WITH query_totals AS (
+                    SELECT client_ip,COUNT(*) AS total,COUNT(DISTINCT domain) AS unique_domains,
+                           SUM(status='blocked') AS blocked,
+                           SUM(CAST(strftime('%H',timestamp) AS INTEGER)<6) AS quiet
+                    FROM queries
+                    WHERE timestamp>=datetime('now','start of day') AND client_ip!=''
+                    GROUP BY client_ip
+                 ), relationship_totals AS (
+                    SELECT client_ip,
+                           COUNT(DISTINCT CASE WHEN target_kind='company' THEN target END) AS companies,
+                           COUNT(DISTINCT CASE WHEN target_kind='domain' AND relation='contains_identifier' THEN target END) AS identifiers,
+                           COUNT(DISTINCT CASE WHEN target_kind='application' THEN target END) AS applications,
+                           COUNT(DISTINCT CASE WHEN target_kind='network' THEN target END) AS networks,
+                           COUNT(DISTINCT CASE WHEN target_kind='country' THEN target END) AS countries
+                    FROM dns_relationships
+                    WHERE observed_at>=datetime('now','start of day') AND client_ip!=''
+                    GROUP BY client_ip
+                 )
+                 SELECT q.client_ip,q.total,q.unique_domains,q.blocked,q.quiet,
+                        COALESCE(r.companies,0),COALESCE(r.identifiers,0),COALESCE(r.applications,0),
+                        COALESCE(r.networks,0),COALESCE(r.countries,0)
+                 FROM query_totals q LEFT JOIN relationship_totals r USING(client_ip)
+                 ORDER BY q.total DESC LIMIT 10000"
+            )?;
+            let rows=stmt.query_map([],|r|Ok((
+                r.get::<_,String>(0)?,row_u64(r,1)?,row_u64(r,2)?,row_u64(r,3)?,row_u64(r,4)?,
+                row_u64(r,5)?,row_u64(r,6)?,row_u64(r,7)?,row_u64(r,8)?,row_u64(r,9)?,
+            )))?;
             let mut output=Vec::new();
             for row in rows {
-                let (device,total,unique,blocked,quiet)=row?;
-                let distinct=|kind:&str,relation:Option<&str>|->anyhow::Result<u64>{
-                    Ok(if let Some(relation)=relation {
-                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2 AND relation=?3",rusqlite::params![&device,kind,relation],|r|row_u64(r,0))?
-                    } else {
-                        conn.query_row("SELECT COUNT(DISTINCT target) FROM dns_relationships WHERE client_ip=?1 AND observed_at>=datetime('now','start of day') AND target_kind=?2",rusqlite::params![&device,kind],|r|row_u64(r,0))?
-                    })
-                };
-                let tracking_companies=distinct("company",None)?;
-                let advertising_identifiers=distinct("domain",Some("contains_identifier"))?;
-                let applications=distinct("application",None)?;
-                let network_spread=distinct("network",None)?;
-                let country_spread=distinct("country",None)?;
+                let (device,total,unique,blocked,quiet,tracking_companies,advertising_identifiers,applications,network_spread,country_spread)=row?;
                 let uniqueness=if total==0{0.0}else{unique as f64/total as f64};
                 let quiet_ratio=if total==0{0.0}else{quiet as f64/total as f64};
                 let score=((tracking_companies.min(4)*8+advertising_identifiers.min(20)+applications.min(5)*2+network_spread.min(7)*2+country_spread.min(5)*3) as f64+uniqueness*18.0+quiet_ratio*10.0).round().min(100.0) as u8;
@@ -502,11 +521,11 @@ impl AnalyticsDb {
     }
 
 
-    pub async fn get_queries_for_export(&self, status_filter: Option<&str>, ip_filter: Option<&str>, days: u32) -> anyhow::Result<Vec<RecentQuery>> {
+    pub async fn get_queries_for_export(&self, status_filter: Option<&str>, ip_filter: Option<&str>, days: u32) -> anyhow::Result<QueryExport> {
         let db_path = self.db_path.clone();
         let status_filter = status_filter.map(str::to_owned);
         let ip_filter = ip_filter.map(str::to_owned);
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RecentQuery>> {
+        tokio::task::spawn_blocking(move || -> anyhow::Result<QueryExport> {
             let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             let mut res = Vec::new();
@@ -528,7 +547,7 @@ impl AnalyticsDb {
             }
         }
 
-        query.push_str("ORDER BY timestamp DESC");
+        query.push_str(&format!("ORDER BY timestamp DESC LIMIT {}", EXPORT_ROW_LIMIT + 1));
 
         let mut stmt = conn.prepare(&query)?;
 
@@ -543,7 +562,9 @@ impl AnalyticsDb {
                 client_ip: row.get(3)?,
             });
         }
-        Ok(res)
+        let truncated=res.len()>EXPORT_ROW_LIMIT;
+        res.truncate(EXPORT_ROW_LIMIT);
+        Ok(QueryExport{rows:res,truncated})
         }).await?
     }
 
@@ -648,23 +669,24 @@ impl AnalyticsDb {
         let conn = self.conn.clone();
         let timeframe = timeframe.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let tx=conn.transaction()?;
             match timeframe.as_str() {
                 "all" => {
-                    conn.execute("DELETE FROM queries", [])?;
-                    conn.execute("DELETE FROM dns_relationships", [])?;
+                    tx.execute("DELETE FROM queries", [])?;
+                    tx.execute("DELETE FROM dns_relationships", [])?;
                 }
                 "1h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 hour')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 hour')", [])?;
+                    tx.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 hour')", [])?;
+                    tx.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 hour')", [])?;
                 }
                 "24h" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 day')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 day')", [])?;
+                    tx.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-1 day')", [])?;
+                    tx.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-1 day')", [])?;
                 }
                 "7d" => {
-                    conn.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-7 days')", [])?;
-                    conn.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-7 days')", [])?;
+                    tx.execute("DELETE FROM queries WHERE timestamp >= datetime('now', '-7 days')", [])?;
+                    tx.execute("DELETE FROM dns_relationships WHERE observed_at >= datetime('now', '-7 days')", [])?;
                 }
                 // An unrecognised timeframe used to be ignored while the API
                 // still answered "Logs deleted successfully", so a typo looked
@@ -673,6 +695,7 @@ impl AnalyticsDb {
                     "Unsupported timeframe {other:?}; expected one of: 1h, 24h, 7d, all"
                 ),
             }
+            tx.commit()?;
             conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
             Ok::<(), anyhow::Error>(())
         })
@@ -1146,6 +1169,17 @@ pub struct PrivacySummary {
     pub score: u8,
 }
 
+#[derive(Debug)]
+pub struct QueryExport {
+    pub rows: Vec<RecentQuery>,
+    pub truncated: bool,
+}
+
+#[cfg(not(test))]
+const EXPORT_ROW_LIMIT: usize = 100_000;
+#[cfg(test)]
+const EXPORT_ROW_LIMIT: usize = 100;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CustomAction {
     pub domain:        String,
@@ -1242,5 +1276,26 @@ pub struct CustomAction {
         let older_edges:i64=conn.query_row("SELECT COUNT(*) FROM dns_relationships WHERE query_domain='older.example'",[],|row|row.get(0)).unwrap();
         assert_eq!((recent_queries,older_queries,recent_edges,older_edges),(0,1,0,1));
         drop(conn);drop(db);let _=std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn exports_are_bounded_and_report_truncation() {
+        let path=test_path("bounded-export");
+        let db=AnalyticsDb::new(path.clone()).unwrap();
+        {
+            let mut conn=db.conn.lock().unwrap();
+            let tx=conn.transaction().unwrap();
+            {
+                let mut statement=tx.prepare("INSERT INTO queries(domain,status,latency_ms,client_ip) VALUES(?1,'allowed',1,'192.0.2.1')").unwrap();
+                for index in 0..=EXPORT_ROW_LIMIT {
+                    statement.execute([format!("export-{index}.example")]).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let export=db.get_queries_for_export(None,None,7).await.unwrap();
+        assert_eq!(export.rows.len(),EXPORT_ROW_LIMIT);
+        assert!(export.truncated);
+        drop(db);let _=std::fs::remove_file(path);
     }
 }

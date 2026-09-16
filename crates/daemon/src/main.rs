@@ -130,9 +130,13 @@ async fn main() -> anyhow::Result<()> {
     }});
     let prune=analytics.clone();
     services.spawn(async move {loop {
-        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
         let db=prune.clone();
-        let _=tokio::task::spawn_blocking(move ||db.cleanup_old_queries()).await;
+        match tokio::task::spawn_blocking(move ||db.cleanup_old_queries()).await {
+            Ok(Ok(()))=>{},
+            Ok(Err(error))=>tracing::error!("Analytics retention failed: {}",error),
+            Err(error)=>tracing::error!("Analytics retention worker failed: {}",error),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
     }});
     // DHCP owns a plain blocking thread; capture its runtime handle while inside Tokio.
     dhcp::start_dhcp_server(dhcp::load_config(),dhcp_devices);
@@ -155,9 +159,23 @@ async fn main() -> anyhow::Result<()> {
 /// container bind-mount all agree on which file is authoritative.
 fn load_host_ip()->String {
     if let Ok(ip)=std::env::var("AEGIS_HOST_IP") {if ip.parse::<std::net::Ipv4Addr>().is_ok() {return ip;}}
-    let path=std::env::var("AEGIS_CONFIG").unwrap_or_else(|_|config::paths::get_data_dir().join("config.json").to_string_lossy().into_owned());
-    let configured=std::fs::read(path).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok());
-    configured.and_then(|v|v.get("host_ips").and_then(|v|v.as_array()).and_then(|ips|ips.iter().filter_map(|v|v.as_str()).find(|ip|ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a|!a.is_loopback())).map(str::to_owned))).unwrap_or_else(||"127.0.0.1".into())
+    config::load_main_config()
+        .and_then(|configured| first_usable_host_ipv4(&configured.host_ips))
+        .unwrap_or_else(||"127.0.0.1".into())
+}
+
+fn first_usable_host_ipv4(host_ips:&[String])->Option<String>{
+    host_ips.iter().find_map(|ip|ip.parse::<std::net::Ipv4Addr>().ok()
+        .filter(|address|!address.is_loopback()&&!address.is_unspecified())
+        .map(|address|address.to_string()))
+}
+
+#[cfg(test)] mod tests {
+    #[test]
+    fn host_ip_selection_skips_invalid_loopback_and_unspecified_entries(){
+        let values=vec!["not-an-ip".into(),"127.0.0.1".into(),"0.0.0.0".into(),"100.64.1.8".into()];
+        assert_eq!(super::first_usable_host_ipv4(&values).as_deref(),Some("100.64.1.8"));
+    }
 }
 async fn shutdown_signal() {
     #[cfg(unix)] {

@@ -71,19 +71,51 @@ pub fn verify_token(raw: &str, stored_hash: &str) -> bool {
 /// The admin must explicitly permit each executable in the service environment.
 /// Legacy shell strings are rejected, never reinterpreted by a shell.
 fn executable_args(command: &str) -> anyhow::Result<Vec<String>> {
-    let args: Vec<String> = serde_json::from_str(command).map_err(|_| anyhow::anyhow!("Command must be a JSON argument array, e.g. [\"/usr/local/bin/job\",\"{{value}}\"]"))?;
+    let args: Vec<String> = serde_json::from_str(command).map_err(|_| anyhow::anyhow!("Command must be a fixed JSON argument array, e.g. [\"/usr/local/bin/job\",\"--quiet\"]"))?;
     let executable = args.first().ok_or_else(||anyhow::anyhow!("Missing executable"))?;
     anyhow::ensure!(args.len() <= 64 && args.iter().all(|s|s.len() <= 4096),"Action arguments too large");
     anyhow::ensure!(std::path::Path::new(executable).is_absolute() && !executable.contains('{'),"Executable must be a fixed absolute path");
+    // A token holder controls request parameters. Substituting those values
+    // into argv is unsafe even without a shell: an allowlisted interpreter can
+    // deliberately treat one argv element as program text (`sh -c`,
+    // `python -c`, and similar modes). Executable actions are therefore
+    // trigger-only with administrator-defined, fixed arguments.
+    anyhow::ensure!(
+        args.iter().skip(1).all(|arg| !arg.contains('{') && !arg.contains('}')),
+        "Executable action arguments must be fixed; request placeholders are not supported",
+    );
     let allowed = std::env::var("AEGIS_ACTION_EXECUTABLES").unwrap_or_default();
     anyhow::ensure!(allowed.split(':').any(|path|path == executable),"Executable is not in AEGIS_ACTION_EXECUTABLES; shell actions are disabled by default");
     Ok(args)
 }
 
+#[cfg(unix)]
+async fn terminate_process_group(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else { return; };
+    // SAFETY: a negative PID addresses the process group created in pre_exec.
+    // Signals are best-effort because the direct child may already have exited.
+    unsafe { libc::kill(-pid, libc::SIGTERM); }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A descendant may ignore SIGTERM. SIGKILL closes the lifecycle boundary.
+    unsafe { libc::kill(-pid, libc::SIGKILL); }
+}
+
+#[cfg(not(unix))]
+async fn terminate_process_group(_pid: u32) {
+    // validate() rejects executable actions on platforms where AegisDNS cannot
+    // enforce a process-tree lifetime. This definition keeps the shared match
+    // arm type-checkable without creating an unsafe compatibility fallback.
+}
+
 pub fn validate(kind: &str, command: Option<&str>, url: Option<&str>, method: Option<&str>, token: Option<&str>) -> anyhow::Result<()> {
     anyhow::ensure!(token.is_some_and(|s|s.len() >= 32 && s.len() <= 256),"Action token must contain 32–256 characters");
     match kind {
-        "shell" => { executable_args(command.unwrap_or(""))?; }
+        "shell" => {
+            #[cfg(not(unix))]
+            anyhow::bail!("Executable actions require Unix process-group isolation");
+            #[cfg(unix)]
+            executable_args(command.unwrap_or(""))?;
+        }
         "webhook" => {
             let url = reqwest::Url::parse(url.unwrap_or(""))?;
             anyhow::ensure!(url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && !url.as_str().contains(['{','}']),"Webhook requires a fixed HTTPS URL; parameters are sent as JSON");
@@ -108,13 +140,7 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
     anyhow::ensure!(params.len() <= 32 && params.iter().all(|(k,v)|k.len() <= 64 && v.len() <= 4096),"Too many or oversized parameters");
     match action.action_type.as_str() {
         "shell" => {
-            let mut args = executable_args(action.shell_command.as_deref().unwrap_or(""))?;
-            for arg in args.iter_mut().skip(1) {
-                // Only whole-argument placeholders. Values stay arguments and cannot become shell syntax.
-                if let Some(key) = arg.strip_prefix('{').and_then(|s|s.strip_suffix('}')) {
-                    *arg = params.get(key).ok_or_else(||anyhow::anyhow!("Missing action parameter"))?.clone();
-                }
-            }
+            let args = executable_args(action.shell_command.as_deref().unwrap_or(""))?;
             let mut cmd = tokio::process::Command::new(&args[0]);
             cmd.args(&args[1..])
                 .stdin(std::process::Stdio::null())
@@ -138,14 +164,35 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
                 unsafe { cmd.pre_exec(|| { libc::setpgid(0, 0); libc::umask(0o077); Ok(()) }); }
             }
             let mut child = cmd.spawn()?;
-            let status = tokio::time::timeout(Duration::from_secs(15),child.wait()).await??;
+            let pid = child.id().ok_or_else(|| anyhow::anyhow!("Action process has no PID"))?;
+            let status = match tokio::time::timeout(Duration::from_secs(15), child.wait()).await {
+                Ok(Ok(status)) => {
+                    // The direct child can exit after daemonizing descendants.
+                    // Always close the entire group before releasing the action
+                    // request's concurrency permit.
+                    terminate_process_group(pid).await;
+                    status
+                }
+                Ok(Err(error)) => {
+                    terminate_process_group(pid).await;
+                    return Err(error.into());
+                }
+                Err(_) => {
+                    terminate_process_group(pid).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                    anyhow::bail!("Action exceeded the 15-second time limit");
+                }
+            };
             anyhow::ensure!(status.success(),"Action exited unsuccessfully");
         }
         "webhook" => {
             let url = reqwest::Url::parse(action.payload_url.as_deref().unwrap_or(""))?;
             let host = url.host_str().ok_or_else(|| anyhow::anyhow!("Webhook host is missing"))?.to_string();
             let port = url.port_or_known_default().ok_or_else(|| anyhow::anyhow!("Webhook port is missing"))?;
-            let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+            let addresses: Vec<std::net::SocketAddr> = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((host.as_str(), port)),
+            ).await.map_err(|_|anyhow::anyhow!("Webhook DNS lookup timed out"))??.collect();
             anyhow::ensure!(!addresses.is_empty(), "Webhook host did not resolve");
             anyhow::ensure!(addresses.iter().all(|addr| !config::is_internal_address(addr.ip())), "Webhook host resolves to a private, local, or special-use address");
             // Pin the checked address so a second DNS lookup cannot rebind the request.
@@ -174,10 +221,37 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
 #[cfg(test)] mod tests {
     #[test] fn reject_legacy_shell_and_unauthenticated_actions() {
         assert!(super::validate("shell",Some("echo {value}"),None,None,Some(&"x".repeat(32))).is_err());
+        // Request values must never become argv for a general-purpose
+        // executable. An allowlisted interpreter would otherwise turn a
+        // seemingly safe whole-argument placeholder into program text.
+        std::env::set_var("AEGIS_ACTION_EXECUTABLES", "/bin/sh");
+        assert!(super::validate(
+            "shell",
+            Some(r#"["/bin/sh","-c","{value}"]"#),
+            None,
+            None,
+            Some(&"x".repeat(32)),
+        ).is_err());
+        std::env::remove_var("AEGIS_ACTION_EXECUTABLES");
         assert!(super::validate("html",None,None,None,None).is_err());
         assert!(super::validate("webhook",None,Some("http://example.com"),Some("POST"),Some(&"x".repeat(32))).is_err());
         assert!(super::validate("webhook",None,Some("https://127.0.0.1/hook"),Some("POST"),Some(&"x".repeat(32))).is_err());
         assert!(super::validate("webhook",None,Some("https://example.com/hook"),Some("DELETE"),Some(&"x".repeat(32))).is_err());
         assert!(super::validate("webhook",None,Some("https://example.com:8443/hook"),Some("POST"),Some(&"x".repeat(32))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_cleanup_terminates_background_descendants() {
+        let mut command=tokio::process::Command::new("/bin/sh");
+        command.args(["-c","sleep 30 & wait"]).kill_on_drop(true);
+        unsafe { command.pre_exec(|| { libc::setpgid(0,0); Ok(()) }); }
+        let mut child=command.spawn().unwrap();
+        let pid=child.id().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        super::terminate_process_group(pid).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2),child.wait()).await.unwrap().unwrap();
+        let group=i32::try_from(pid).unwrap();
+        assert_ne!(unsafe { libc::kill(-group,0) },0,"no action descendant may survive cleanup");
     }
 }

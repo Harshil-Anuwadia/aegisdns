@@ -8,13 +8,11 @@ pub struct UnboundManager {
 
 /// Address used by the policy proxy for recursive lookups.
 /// Unix deployments use the supervised, validating Unbound instance. Native
-/// Windows builds currently use a direct public fallback because Unbound is
-/// not bundled there.
+/// Native Windows must not silently weaken validation. The supported Windows
+/// deployment runs the Linux containers, where this loopback endpoint is
+/// backed by the supervised Unbound process.
 pub fn proxy_upstream_addr() -> &'static str {
-    #[cfg(windows)]
-    { "8.8.8.8:53" }
-    #[cfg(not(windows))]
-    { "127.0.0.1:5353" }
+    "127.0.0.1:5353"
 }
 
 impl UnboundManager {
@@ -25,8 +23,7 @@ impl UnboundManager {
     pub async fn start(&mut self) -> anyhow::Result<()> {
         #[cfg(windows)]
         {
-            tracing::warn!("Unbound is not bundled for native Windows; forwarding to 8.8.8.8 without local DNSSEC validation");
-            return Ok(());
+            anyhow::bail!("Native Windows cannot provide AegisDNS's validating resolver; run the supported Linux containers through Docker Desktop");
         }
 
         #[cfg(unix)]

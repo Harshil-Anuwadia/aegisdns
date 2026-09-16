@@ -247,19 +247,27 @@ pub fn start_dhcp_server(config: DhcpConfig, device_registry: Arc<RwLock<DeviceR
     let server_ip: Ipv4Addr = config.server_ip.parse().unwrap_or(Ipv4Addr::new(192,168,1,1));
     if let Err(e)=validate_config(&config) { error!("DHCP configuration rejected: {}",e); return; }
     let rt = tokio::runtime::Handle::current();
-    std::thread::spawn(move || {
+    if let Err(error)=std::thread::Builder::new().name("aegisdns-dhcp".into()).spawn(move || loop {
         match UdpSocket::bind("0.0.0.0:67") {
             Ok(socket) => {
-                let _ = socket.set_broadcast(true);
+                if let Err(error)=socket.set_broadcast(true) {
+                    error!("Failed to enable DHCP broadcast mode: {}",error);
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
                 info!("DHCP Server started on 0.0.0.0:67 (Server IP: {})", server_ip);
-                let handler = AegisDhcpServer::new(config, device_registry, rt);
+                let handler = AegisDhcpServer::new(config.clone(), device_registry.clone(), rt.clone());
                 server::Server::serve(socket, server_ip, handler);
+                error!("DHCP server stopped unexpectedly; retrying in 5 seconds");
             }
-            Err(e) => {
-                error!("Failed to bind DHCP socket on port 67: {}. (Are you running as root?)", e);
+            Err(error) => {
+                error!("Failed to bind DHCP socket on port 67: {}; retrying in 5 seconds", error);
             }
         }
-    });
+        std::thread::sleep(Duration::from_secs(5));
+    }) {
+        error!("Failed to start DHCP supervisor thread: {}",error);
+    }
 }
 
 pub fn validate_config(c:&DhcpConfig)->Result<(),String> {

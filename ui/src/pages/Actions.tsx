@@ -219,14 +219,14 @@ function ActionForm({
       {kind === "shell" && (
         <Field
           label="Argument array"
-          hint="The executable must be an absolute path permitted by AEGIS_ACTION_EXECUTABLES."
+          hint="Use fixed arguments only. Request values are never inserted into executable commands."
         >
           <textarea
             className="mono"
             name="command"
             required
             defaultValue={initial?.shell_command || ""}
-            placeholder={'["/usr/local/bin/job", "{value}"]'}
+            placeholder={'["/usr/local/bin/job", "--quiet"]'}
           />
         </Field>
       )}

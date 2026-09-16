@@ -163,10 +163,11 @@ pub async fn start_action_server(
     host_ip: &str,
 ) -> anyhow::Result<()> {
     use axum::{extract::Host, response::IntoResponse};
-    let limits = Arc::new(tokio::sync::Semaphore::new(8));
+    let execution_limits = Arc::new(tokio::sync::Semaphore::new(8));
+    let admission_limits = Arc::new(tokio::sync::Semaphore::new(32));
     let app = Router::new().fallback(post(move |Host(host): Host,
         headers: axum::http::HeaderMap, Json(params): Json<HashMap<String,String>>| {
-        let analytics = analytics.clone(); let limits = limits.clone();
+        let analytics = analytics.clone(); let execution_limits = execution_limits.clone();
         async move {
             let host = config::canonical_domain(host.split(':').next().unwrap_or(&host));
             let Some(action) = crate::actions::get_action_for_domain_db(&host, &analytics).await else {
@@ -176,7 +177,7 @@ pub async fn start_action_server(
             if provided.len() < 32 || !action.token.as_ref().is_some_and(|hash| crate::actions::verify_token(provided, hash)) {
                 return (axum::http::StatusCode::UNAUTHORIZED,"A valid action Bearer token is required").into_response();
             }
-            let Ok(_permit) = limits.try_acquire_owned() else { return (axum::http::StatusCode::TOO_MANY_REQUESTS,"Action limit reached").into_response(); };
+            let Ok(_permit) = execution_limits.try_acquire_owned() else { return (axum::http::StatusCode::TOO_MANY_REQUESTS,"Action execution limit reached").into_response(); };
             let result = crate::actions::execute(&action, &params, provided).await;
             match result {
                 Ok(body) => {
@@ -193,13 +194,69 @@ pub async fn start_action_server(
                 }
             }
         }
-    })).layer(axum::extract::DefaultBodyLimit::max(32 * 1024));
-    let addr: SocketAddr = std::env::var("AEGIS_ACTION_LISTEN").unwrap_or_else(|_|format!("{}:5381",host_ip)).parse()?;
-    anyhow::ensure!(config::allowed_dns_client(addr.ip()),"Action listener must use a loopback, private LAN, or Tailscale address");
+    }))
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
+        // This outer layer runs before handler extractors, so unauthenticated
+        // JSON parsing is bounded separately from the eight expensive action
+        // executions. The deadline covers body reads and handler work.
+        .layer(axum::middleware::from_fn_with_state(admission_limits, action_admission));
+    let configured = std::env::var("AEGIS_ACTION_LISTEN").ok();
+    let allow_insecure_lan = matches!(
+        std::env::var("AEGIS_ACTION_ALLOW_INSECURE_LAN").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    );
+    let addr = action_listen_addr(configured.as_deref(), host_ip, allow_insecure_lan)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Action API listening on {} (authenticated POST only)",addr);
     axum::serve(listener,app).await?;
     Ok(())
+}
+
+async fn action_admission(
+    State(limit): State<Arc<tokio::sync::Semaphore>>,
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Ok(_permit) = limit.try_acquire_owned() else {
+        return (axum::http::StatusCode::TOO_MANY_REQUESTS, "Action request limit reached").into_response();
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(20), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (axum::http::StatusCode::REQUEST_TIMEOUT, "Action request timed out").into_response(),
+    }
+}
+
+fn tailscale_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            octets[0] == 100 && (octets[1] & 0xc0) == 64
+        }
+        std::net::IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+    }
+}
+
+fn action_listen_addr(configured: Option<&str>, host_ip: &str, allow_insecure_lan: bool) -> anyhow::Result<SocketAddr> {
+    // Compose expands an unset AEGIS_ACTION_LISTEN to an empty string. Treat
+    // that exactly like an unset variable instead of failing every startup.
+    let configured = configured.map(str::trim).filter(|value| !value.is_empty());
+    let default_ip = host_ip.parse::<std::net::IpAddr>().ok()
+        .filter(|ip| ip.is_loopback() || tailscale_address(*ip))
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr: SocketAddr = configured
+        .map(str::to_owned)
+        .unwrap_or_else(|| SocketAddr::new(default_ip, 5381).to_string())
+        .parse()?;
+    anyhow::ensure!(config::allowed_dns_client(addr.ip()), "Action listener must use a loopback, private LAN, or Tailscale address");
+    anyhow::ensure!(
+        addr.ip().is_loopback() || tailscale_address(addr.ip()) || allow_insecure_lan,
+        "Plaintext action credentials are allowed only on loopback or Tailscale; use a TLS proxy or set AEGIS_ACTION_ALLOW_INSECURE_LAN=1 explicitly",
+    );
+    Ok(addr)
 }
 
 #[derive(Serialize)]
@@ -1366,8 +1423,8 @@ async fn get_export_logs(State(state): State<AppState>, Query(q): Query<ExportQu
     let ip     = q.ip.as_deref().filter(|s| !s.is_empty() && *s != "all");
     let fmt    = q.format.as_deref().unwrap_or("csv");
 
-    let rows = match state.analytics.get_queries_for_export(status, ip, days).await {
-        Ok(r)  => r,
+    let export = match state.analytics.get_queries_for_export(status, ip, days).await {
+        Ok(export)  => export,
         Err(e) => {
             return axum::response::Response::builder()
                 .status(500)
@@ -1376,18 +1433,20 @@ async fn get_export_logs(State(state): State<AppState>, Query(q): Query<ExportQu
         }
     };
 
+    let truncated=if export.truncated {"true"} else {"false"};
     if fmt == "json" {
-        let json = serde_json::to_string(&rows).unwrap_or_default();
+        let json = serde_json::to_string(&export.rows).unwrap_or_default();
         return axum::response::Response::builder()
             .header("Content-Type", "application/json")
             .header("Content-Disposition", "attachment; filename=\"aegisdns_logs.json\"")
+            .header("X-Aegis-Export-Truncated",truncated)
             .body(axum::body::Body::from(json))
             .unwrap();
     }
 
     // Default: CSV
     let mut csv = String::from("timestamp,domain,status,client_ip\n");
-    for r in &rows {
+    for r in &export.rows {
         csv.push_str(&format!(
             "{},{},{},{}\n",
             csv_cell(&r.timestamp), csv_cell(&r.domain), csv_cell(&r.status), csv_cell(&r.client_ip)
@@ -1396,6 +1455,7 @@ async fn get_export_logs(State(state): State<AppState>, Query(q): Query<ExportQu
     axum::response::Response::builder()
         .header("Content-Type", "text/csv")
         .header("Content-Disposition", "attachment; filename=\"aegisdns_logs.csv\"")
+        .header("X-Aegis-Export-Truncated",truncated)
         .body(axum::body::Body::from(csv))
         .unwrap()
 }
@@ -1561,6 +1621,59 @@ fn csv_cell(value:&str)->String {
 
 #[cfg(test)] mod security_tests {
     use super::*;
+
+    #[test]
+    fn action_listener_requires_protected_transport_for_remote_use() {
+        assert_eq!(
+            action_listen_addr(None, "192.168.1.20", false).unwrap(),
+            "127.0.0.1:5381".parse().unwrap(),
+            "ordinary LAN host addresses must default to loopback",
+        );
+        assert_eq!(
+            action_listen_addr(Some("  "), "192.168.1.20", false).unwrap(),
+            "127.0.0.1:5381".parse().unwrap(),
+            "an empty Compose environment value must use the safe default",
+        );
+        assert_eq!(
+            action_listen_addr(None, "100.64.1.20", false).unwrap(),
+            "100.64.1.20:5381".parse().unwrap(),
+            "Tailscale addresses are protected by the overlay transport",
+        );
+        assert!(action_listen_addr(Some("192.168.1.20:5381"), "192.168.1.20", false).is_err());
+        assert!(action_listen_addr(Some("192.168.1.20:5381"), "192.168.1.20", true).is_ok());
+        assert!(action_listen_addr(Some("8.8.8.8:5381"), "192.168.1.20", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn action_admission_rejects_before_the_handler_runs() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route(
+                "/",
+                post(|| async {
+                    panic!("saturated requests must not reach the handler");
+                    #[allow(unreachable_code)]
+                    axum::http::StatusCode::OK
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(tokio::sync::Semaphore::new(0)),
+                action_admission,
+            ));
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
     #[tokio::test]
     async fn saved_action_authenticates_without_disclosing_its_token() {
         let path = std::env::temp_dir().join(format!("aegis-action-{}-{}.db", std::process::id(), rand::random::<u64>()));
