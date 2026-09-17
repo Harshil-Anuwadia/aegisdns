@@ -15,6 +15,88 @@ pub struct TelegramConfig {
     pub notify_blocked: bool,
 }
 
+/// Structured context for one DNS notification. Formatting lives here rather
+/// than at the query call site so every alert has the same readable contract.
+#[derive(Debug, Clone)]
+pub struct DnsAlert {
+    pub domain: String,
+    pub client_ip: String,
+    pub device_name: Option<String>,
+    pub query_type: String,
+    pub transport: &'static str,
+    pub blocked: bool,
+    pub resolution_failed: bool,
+    pub block_reason: Option<String>,
+    pub risk_score: u8,
+    pub risk_level: &'static str,
+    pub risk_factors: Vec<String>,
+}
+
+impl DnsAlert {
+    fn dedupe_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}",
+            self.client_ip, self.domain, self.query_type, self.blocked, self.resolution_failed
+        )
+    }
+}
+
+/// Produce compact Telegram HTML with enough context to make the alert useful
+/// without opening the dashboard. All query-derived values are escaped.
+pub fn format_dns_alert(alert: &DnsAlert) -> String {
+    let title = if alert.blocked {
+        "🛡️ <b>DNS request blocked</b>"
+    } else if alert.resolution_failed {
+        "❗ <b>High-risk DNS request failed</b>"
+    } else if alert.risk_score >= 85 {
+        "🚨 <b>Critical DNS risk detected</b>"
+    } else {
+        "⚠️ <b>High-risk DNS request allowed</b>"
+    };
+    let domain = config::html_escape(&alert.domain);
+    let client = config::html_escape(&alert.client_ip);
+    let query_type = config::html_escape(&alert.query_type);
+    let risk_level = config::html_escape(alert.risk_level);
+    let device = match alert.device_name.as_deref() {
+        Some(name) => format!("{} · <code>{client}</code>", config::html_escape(name)),
+        None => format!("<code>{client}</code>"),
+    };
+
+    let mut message = format!(
+        "{title}\n\n<b>Domain</b>  <code>{domain}</code>\n<b>Device</b>  {device}\n<b>Query</b>  {query_type} · {}\n<b>Risk</b>  {risk_level} · {}/100",
+        alert.transport, alert.risk_score
+    );
+    if let Some(reason) = alert.block_reason.as_deref() {
+        message.push_str(&format!("\n<b>Reason</b>  {}", config::html_escape(reason)));
+    }
+
+    let factors: Vec<String> = alert
+        .risk_factors
+        .iter()
+        .filter(|factor| !factor.starts_with("No significant") && !factor.starts_with("Trusted"))
+        .take(3)
+        .map(|factor| format!("• {}", config::html_escape(factor)))
+        .collect();
+    if !factors.is_empty() {
+        message.push_str("\n\n<b>Why it was flagged</b>\n");
+        message.push_str(&factors.join("\n"));
+    }
+
+    if alert.blocked {
+        message.push_str("\n\n<b>Outcome</b>  AegisDNS returned NXDOMAIN. No destination was provided.");
+    } else if alert.resolution_failed {
+        message.push_str("\n\n<b>Outcome</b>  Resolution failed with SERVFAIL. No destination was provided.");
+    } else {
+        message.push_str("\n\n<b>Outcome</b>  Allowed by the current policy. Review the domain if this traffic is unexpected.");
+    }
+    message.push_str("\n\n<i>Review in AegisDNS → Traffic</i>");
+    message
+}
+
+pub fn format_test_message() -> &'static str {
+    "✅ <b>AegisDNS alerts are ready</b>\n\nTelegram delivery is working. Future alerts will identify the domain, device, query type, policy outcome, risk score, and detection signals.\n\n<i>You can change the threshold in AegisDNS → Alerts.</i>"
+}
+
 fn config_path() -> PathBuf {
     config::paths::get_data_dir().join("telegram.json")
 }
@@ -88,18 +170,21 @@ pub fn build_telegram_client() -> Result<reqwest::Client, String> {
     .clone()
 }
 
-/// Non-blocking alert — spawns a tokio task so DNS is never delayed.
-pub fn send_alert(cfg: Arc<RwLock<TelegramConfig>>, message: String) {
+/// Non-blocking alert — spawns a Tokio task so DNS is never delayed. Repeated
+/// copies of the same device/domain/query outcome are quieted for five minutes,
+/// while unrelated alerts remain eligible for immediate delivery.
+pub fn send_dns_alert(cfg: Arc<RwLock<TelegramConfig>>, alert: DnsAlert) {
     static LIMIT: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = std::sync::OnceLock::new();
-    let Ok(permit) = LIMIT.get_or_init(||Arc::new(tokio::sync::Semaphore::new(2))).clone().try_acquire_owned() else { return; };
-    {
-        // Recover from poisoning: a panic elsewhere must not permanently
-        // disable alerting, and the guarded value is a single Instant.
-        let mut last = LAST.get_or_init(||std::sync::Mutex::new(None)).lock().unwrap_or_else(|e|e.into_inner());
-        if last.is_some_and(|t|t.elapsed() < std::time::Duration::from_secs(5)) { return; }
-        *last = Some(std::time::Instant::now());
-    }
+    static RECENT: std::sync::OnceLock<moka::sync::Cache<String, ()>> = std::sync::OnceLock::new();
+    let Ok(permit) = LIMIT.get_or_init(||Arc::new(tokio::sync::Semaphore::new(4))).clone().try_acquire_owned() else { return; };
+    let recent = RECENT.get_or_init(||moka::sync::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(std::time::Duration::from_secs(300))
+        .build());
+    let key = alert.dedupe_key();
+    if recent.get(&key).is_some() { return; }
+    recent.insert(key, ());
+    let message = format_dns_alert(&alert);
     tokio::spawn(async move {
         let _permit = permit;
         let cfg = cfg.read().await.clone();
@@ -177,5 +262,71 @@ mod tests {
     #[test]
     fn empty_token_leaves_text_unchanged() {
         assert_eq!(redact_token("connection refused", ""), "connection refused");
+    }
+
+    #[test]
+    fn blocked_alert_is_specific_and_escapes_untrusted_values() {
+        let message = format_dns_alert(&DnsAlert {
+            domain: "login-<fake>.xyz".into(),
+            client_ip: "192.0.2.10".into(),
+            device_name: Some("Living Room <TV>".into()),
+            query_type: "A".into(),
+            transport: "UDP",
+            blocked: true,
+            resolution_failed: false,
+            block_reason: Some("Phishing protection".into()),
+            risk_score: 92,
+            risk_level: "Critical",
+            risk_factors: vec!["Suspicious keyword: 'login'".into()],
+        });
+
+        assert!(message.contains("DNS request blocked"));
+        assert!(message.contains("Living Room &lt;TV&gt;"));
+        assert!(message.contains("login-&lt;fake&gt;.xyz"));
+        assert!(message.contains("Phishing protection"));
+        assert!(message.contains("AegisDNS returned NXDOMAIN"));
+        assert!(!message.contains("<fake>"));
+    }
+
+    #[test]
+    fn allowed_threat_alert_explains_that_policy_did_not_block_it() {
+        let message = format_dns_alert(&DnsAlert {
+            domain: "account-check.example".into(),
+            client_ip: "192.0.2.11".into(),
+            device_name: None,
+            query_type: "AAAA".into(),
+            transport: "TCP",
+            blocked: false,
+            resolution_failed: false,
+            block_reason: None,
+            risk_score: 78,
+            risk_level: "High",
+            risk_factors: vec!["Suspicious keyword: 'account'".into()],
+        });
+
+        assert!(message.contains("High-risk DNS request allowed"));
+        assert!(message.contains("Allowed by the current policy"));
+        assert!(message.contains("192.0.2.11"));
+        assert!(message.contains("AAAA · TCP"));
+    }
+
+    #[test]
+    fn alert_dedupe_is_scoped_to_the_same_event() {
+        let first = DnsAlert {
+            domain: "one.example".into(),
+            client_ip: "192.0.2.12".into(),
+            device_name: None,
+            query_type: "A".into(),
+            transport: "UDP",
+            blocked: true,
+            resolution_failed: false,
+            block_reason: Some("Active blocklist".into()),
+            risk_score: 0,
+            risk_level: "Safe",
+            risk_factors: vec![],
+        };
+        let mut second = first.clone();
+        second.domain = "two.example".into();
+        assert_ne!(first.dedupe_key(), second.dedupe_key());
     }
 }

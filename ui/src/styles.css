@@ -40,6 +40,22 @@
   background: var(--background);
   color: var(--text-primary);
 }
+
+.mobile-access-panel { display: grid; gap: 18px; align-items: start; }
+.mobile-access-panel h2 { margin: 0 0 6px; font-size: 1.18rem; }
+.mobile-access-panel p { margin: 0; color: var(--text-muted); line-height: 1.6; }
+.mobile-access-mark { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 14px; color: var(--accent); background: var(--surface-elevated); }
+.mobile-access-url { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-elevated); }
+.mobile-access-url > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-steps { list-style: none; padding: 0; margin: 22px 0; display: grid; gap: 16px; }
+.connection-steps li { display: flex; gap: 12px; align-items: flex-start; }
+.connection-steps li > span { width: 26px; height: 26px; flex: 0 0 26px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--text-muted); font: 12px var(--font-mono); }
+.connection-steps strong, .connection-steps small { display: block; }
+.connection-steps small { margin-top: 3px; color: var(--text-muted); line-height: 1.45; }
+@media (max-width: 680px) {
+  .mobile-access-url { align-items: stretch; flex-wrap: wrap; }
+  .mobile-access-url > span { flex-basis: 100%; padding-bottom: 4px; }
+}
 :root[data-theme="light"] {
   color-scheme: light;
   --background: #f2f4f0;

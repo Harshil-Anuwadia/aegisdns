@@ -22,6 +22,9 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 WINDOWS = os.name == 'nt'
 CLI_LINK = Path('/usr/local/bin/aegis')
+MOBILE_HELPER = Path('/usr/local/libexec/aegisdns-mobile-helper')
+MOBILE_SOCKET_UNIT = Path('/etc/systemd/system/aegisdns-mobile.socket')
+MOBILE_SERVICE_UNIT = Path('/etc/systemd/system/aegisdns-mobile@.service')
 
 # Repair /etc/resolv.conf when Tailscale has left its own resolver behind and
 # the build would otherwise have no working DNS.
@@ -480,7 +483,11 @@ class Setup:
             raise SetupError('Run setup as a regular user, not root. sudo is requested for host changes.')
         names = ['docker-compose.yml', 'aegis', 'openroot.example.json']
         if self.args.action == 'install':
-            names += ['Dockerfile', 'Dockerfile.openroot', 'Cargo.lock', 'ui/package-lock.json']
+            names += [
+                'Dockerfile', 'Dockerfile.openroot', 'Cargo.lock', 'ui/package-lock.json',
+                'scripts/mobile-access-helper.py', 'packaging/aegisdns-mobile.socket',
+                'packaging/aegisdns-mobile@.service',
+            ]
         for name in names:
             if not (ROOT / name).is_file():
                 raise SetupError(f'Missing {name}. Run setup from a complete AegisDNS checkout.')
@@ -609,6 +616,33 @@ class Setup:
         return self.runner.run(['bash', ROOT / 'aegis', command],
                                interactive=not self.args.yes, timeout=180)
 
+    def install_mobile_helper(self):
+        if WINDOWS or not self.args.tailscale:
+            return
+        if not shutil.which('systemctl'):
+            self.ui.warn('One-click mobile access needs systemd; the DNS service will still work normally.')
+            return
+        self.sudo_run('install', '-D', '-m', '0755', ROOT / 'scripts/mobile-access-helper.py', MOBILE_HELPER, timeout=15)
+        self.sudo_run('install', '-m', '0644', ROOT / 'packaging/aegisdns-mobile.socket', MOBILE_SOCKET_UNIT, timeout=15)
+        self.sudo_run('install', '-m', '0644', ROOT / 'packaging/aegisdns-mobile@.service', MOBILE_SERVICE_UNIT, timeout=15)
+        self.sudo_run('systemctl', 'daemon-reload', timeout=20)
+        self.sudo_run('systemctl', 'enable', '--now', 'aegisdns-mobile.socket', timeout=20)
+
+    def remove_mobile_helper(self):
+        if WINDOWS or not shutil.which('systemctl'):
+            return
+        try:
+            with socket.create_connection(('127.0.0.1', 5382), timeout=2) as connection:
+                connection.sendall(b'{"action":"disable"}\n')
+                connection.shutdown(socket.SHUT_WR)
+                connection.recv(65536)
+        except OSError:
+            pass
+        if MOBILE_SOCKET_UNIT.exists():
+            self.sudo_run('systemctl', 'disable', '--now', 'aegisdns-mobile.socket', timeout=20)
+        self.sudo_run('rm', '-f', '--', MOBILE_SOCKET_UNIT, MOBILE_SERVICE_UNIT, MOBILE_HELPER, timeout=15)
+        self.sudo_run('systemctl', 'daemon-reload', timeout=20)
+
     def ready(self):
         import urllib.request
         import urllib.error
@@ -697,6 +731,7 @@ class Setup:
             # This command may prompt even after validation when sudoers uses a
             # zero-length timestamp. Never force a cached credential here.
             self.sudo_run('ln', '-sfn', str(ROOT / 'aegis'), CLI_LINK, timeout=15)
+            self.install_mobile_helper()
         self.ui.done('Use aegis for daily control' if not WINDOWS else 'Use Docker Compose for daily control on Windows')
         self.ui.step(6, 6, 'Start and verify' if not self.args.no_start else 'Leave ready to start')
         if not self.args.no_start:
@@ -743,6 +778,7 @@ class Setup:
             self.runner.run(self.compose + ['down', '--volumes'], timeout=90, activity='Removing stored data')
             self.ui.done('Compose-managed data removed. Local configuration and blocklist files remain.')
         if not WINDOWS:
+            self.remove_mobile_helper()
             target = CLI_LINK
             if target.is_symlink() and target.resolve() == ROOT / 'aegis':
                 self.sudo_run('rm', '--', target, timeout=15)

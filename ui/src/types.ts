@@ -140,3 +140,12 @@ export interface Result {
   success: boolean;
   message: string;
 }
+export interface MobileAccess {
+  success: boolean;
+  available: boolean;
+  enabled: boolean;
+  conflict: boolean;
+  url?: string;
+  dns_name?: string;
+  message: string;
+}

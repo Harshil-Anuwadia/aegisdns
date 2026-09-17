@@ -27,7 +27,7 @@ pub struct DnsProxy {
     connections: Arc<Semaphore>,
     client_limits: moka::sync::Cache<IpAddr, Arc<Semaphore>>,
     typo_cache: Cache<String, bool>,
-    risk_cache: Cache<String, u8>,
+    risk_cache: Cache<String, risk::RiskScore>,
     privacy: Arc<crate::privacy::PrivacyGuard>,
     ip_metadata: crate::relationships::IpMetadata,
 }
@@ -152,8 +152,8 @@ impl DnsProxy {
         // on default and kids profiles where legitimate domains may score unexpectedly high.
         if profile == "strict" {
             let c2 = canonical.clone();
-            let risk_score = self.risk_cache.get_with(canonical, async move { risk::score_domain(&c2).score }).await;
-            if risk_score >= 70 {
+            let assessment = self.risk_cache.get_with(canonical, async move { risk::score_domain(&c2) }).await;
+            if assessment.score >= 70 {
                 return PolicyDecision::Blocked(policy::BlockReason::Security);
             }
         }
@@ -197,8 +197,24 @@ impl DnsProxy {
         let qt = q.queries[0].query_type;
         if q.edns.as_ref().is_some_and(|e| e.version() != 0) { return dns::encode_for_client(&dns::reply(&q, ResponseCode::BADVERS), &q, tcp); }
         let start = Instant::now();
-        let mut blocked = self.anomaly.check_and_record(client).await;
+        let anomaly_blocked = self.anomaly.check_and_record(client).await;
+        let mut blocked = anomaly_blocked;
+        let mut block_reason = anomaly_blocked.then(||"Query-rate protection".to_string());
         let decision = self.decision(&domain, client).await;
+        if let PolicyDecision::Blocked(reason) = &decision {
+            block_reason = Some(match reason {
+                policy::BlockReason::ExplicitDeny => "Explicit deny rule".into(),
+                policy::BlockReason::ScheduledBlock => "Active schedule".into(),
+                policy::BlockReason::Security => "Strict-profile security policy".into(),
+                policy::BlockReason::Malware => "Malware protection".into(),
+                policy::BlockReason::Phishing => "Phishing protection".into(),
+                policy::BlockReason::Tracker => "Tracker blocklist".into(),
+                policy::BlockReason::Advertisement => "Advertising blocklist".into(),
+                policy::BlockReason::Telemetry => "Telemetry blocklist".into(),
+                policy::BlockReason::PrivacyBudget => "Device privacy budget".into(),
+                policy::BlockReason::CategorySpecific(category) => format!("Category rule: {category}"),
+            });
+        }
         blocked |= matches!(decision, PolicyDecision::Blocked(_));
         let bypass = matches!(decision, PolicyDecision::Allowed(ref reason) if reason.bypass_filtering());
         let response = if blocked {
@@ -229,6 +245,7 @@ impl DnsProxy {
             match tokio::time::timeout(Duration::from_secs(10), exchange(addr, &q, tcp)).await {
                 Ok(Ok(r)) => {
                     let mut unsafe_answer = false;
+                    let mut unsafe_reason = None;
                     let mut resolved_ips = Vec::new();
                     let mut flux_exempt = risk::FastFluxDetector::is_exempt(&domain);
                     for record in r.answers.iter().chain(&r.additionals) {
@@ -236,21 +253,31 @@ impl DnsProxy {
                             RData::CNAME(name) => {
                                 let target=config::canonical_domain(&name.0.to_ascii());
                                 flux_exempt |= risk::FastFluxDetector::is_exempt(&target);
-                                if !bypass && matches!(self.decision(&target, client).await, PolicyDecision::Blocked(_)) { unsafe_answer = true; }
+                                if !bypass && matches!(self.decision(&target, client).await, PolicyDecision::Blocked(_)) {
+                                    unsafe_answer = true;
+                                    unsafe_reason.get_or_insert("Blocked CNAME destination");
+                                }
                             }
                             // DNS rebinding protection always applies, even for bypass clients.
                             // bypass only skips policy/blocklist filtering, not network-level security.
-                            RData::A(ip) if !local => { let ip=IpAddr::from(ip.0); unsafe_answer |= config::is_internal_address(ip); resolved_ips.push(ip); },
-                            RData::AAAA(ip) if !local => { let ip=IpAddr::from(ip.0); unsafe_answer |= config::is_internal_address(ip); resolved_ips.push(ip); },
+                            RData::A(ip) if !local => { let ip=IpAddr::from(ip.0); if config::is_internal_address(ip) { unsafe_answer=true; unsafe_reason.get_or_insert("DNS rebinding protection"); } resolved_ips.push(ip); },
+                            RData::AAAA(ip) if !local => { let ip=IpAddr::from(ip.0); if config::is_internal_address(ip) { unsafe_answer=true; unsafe_reason.get_or_insert("DNS rebinding protection"); } resolved_ips.push(ip); },
                             _ => {}
                         }
                     }
                     if !local && !bypass && !flux_exempt && !resolved_ips.is_empty() {
                         let mut detector=self.fast_flux.write().await;
                         for ip in resolved_ips { detector.record_resolution(&domain,ip); }
-                        unsafe_answer |= detector.is_fast_flux(&domain);
+                        if detector.is_fast_flux(&domain) {
+                            unsafe_answer = true;
+                            unsafe_reason.get_or_insert("Fast-flux protection");
+                        }
                     }
-                    if unsafe_answer { blocked = true; dns::negative(&q, ResponseCode::NXDomain) } else {
+                    if unsafe_answer {
+                        blocked = true;
+                        block_reason.get_or_insert_with(||unsafe_reason.unwrap_or("Unsafe DNS response").into());
+                        dns::negative(&q, ResponseCode::NXDomain)
+                    } else {
                         r
                     }
                 }
@@ -267,17 +294,31 @@ impl DnsProxy {
         let tg = self.telegram_config.read().await.clone();
         if tg.enabled {
             let canonical = config::canonical_domain(&domain);
-            let score = self.risk_cache.get_with(canonical.clone(), async move { risk::score_domain(&canonical).score }).await;
-            if score >= tg.threat_threshold || (blocked && tg.notify_blocked) {
-                crate::telegram::send_alert(
+            let assessment = self.risk_cache.get_with(canonical.clone(), async move { risk::score_domain(&canonical) }).await;
+            if assessment.score >= tg.threat_threshold || (blocked && tg.notify_blocked) {
+                let device_name = self.device_registry.read().await.get_name(client);
+                let risk_level = match assessment.level {
+                    risk::RiskLevel::Safe => "Safe",
+                    risk::RiskLevel::Low => "Low",
+                    risk::RiskLevel::Medium => "Medium",
+                    risk::RiskLevel::High => "High",
+                    risk::RiskLevel::Critical => "Critical",
+                };
+                crate::telegram::send_dns_alert(
                     self.telegram_config.clone(),
-                    format!(
-                        "DNS {}: {} from {} (risk score {})",
-                        if blocked { "request blocked" } else { "threat detected" },
-                        config::html_escape(&domain),
-                        config::html_escape(client),
-                        score
-                    ),
+                    crate::telegram::DnsAlert {
+                        domain: domain.clone(),
+                        client_ip: client.to_string(),
+                        device_name,
+                        query_type: format!("{qt:?}"),
+                        transport: if tcp { "TCP" } else { "UDP" },
+                        blocked,
+                        resolution_failed: failed,
+                        block_reason,
+                        risk_score: assessment.score,
+                        risk_level,
+                        risk_factors: assessment.factors,
+                    },
                 );
             }
         }

@@ -470,7 +470,12 @@ pub fn score_domain(domain: &str) -> RiskScore {
         if *part == name_part || *part == tld { continue; }
         
         for &brand in PROTECTED_BRANDS {
-            if *part == brand || levenshtein(part, brand) == 1 {
+            // Exact brand labels remain meaningful (paypal.evil.example), but
+            // fuzzy matches use the same length/confusable safeguards as the
+            // registrable-domain check. A raw edit-distance comparison made
+            // infrastructure labels such as `sni` impersonate the short brand
+            // `sbi`, breaking legitimate CDN CNAME chains in strict mode.
+            if *part == brand || brand_impersonation(part, brand).is_some() {
                 score += 65;
                 factors.push(format!("Phishing indicator: subdomain '{}' impersonates brand '{}'", part, brand));
                 break;
@@ -543,6 +548,16 @@ mod tests {
                 r.factors
             );
         }
+    }
+
+    #[test]
+    fn short_infrastructure_labels_are_not_brand_impersonation() {
+        let result = score_domain("dualstack.k.sni.global.fastly.net");
+        assert!(
+            result.score < 70,
+            "ordinary SNI infrastructure must not be blocked as an SBI lookalike: {:?}",
+            result.factors
+        );
     }
 
     /// Short brands cannot support a one-edit comparison at all: "ski" and

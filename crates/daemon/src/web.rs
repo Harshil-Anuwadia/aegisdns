@@ -98,6 +98,7 @@ pub async fn start_web_server(
         .route("/api/safesearch", get(get_safesearch))
         .route("/api/safesearch", post(post_safesearch))
         .route("/api/me", get(get_my_ip))
+        .route("/api/mobile-access", get(get_mobile_access).post(post_mobile_access))
         .route("/api/quarantine", get(get_quarantine))
         .route("/api/quarantine/:ip", delete(delete_quarantine))
         .route("/api/actions", get(get_actions))
@@ -155,6 +156,26 @@ async fn post_privacy(State(state):State<AppState>,Json(config):Json<crate::priv
 async fn get_my_ip(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Json<MyIp> {
     let ip = normalize_ip(&addr.ip().to_string());
     Json(MyIp { ip })
+}
+
+#[derive(Deserialize)]
+struct MobileAccessRequest {
+    enabled: bool,
+}
+
+async fn get_mobile_access() -> Json<crate::mobile::MobileAccess> {
+    Json(crate::mobile::request("status").await)
+}
+
+async fn post_mobile_access(
+    Json(request): Json<MobileAccessRequest>,
+) -> Json<crate::mobile::MobileAccess> {
+    Json(crate::mobile::request(if request.enabled {
+        "enable"
+    } else {
+        "disable"
+    })
+    .await)
 }
 
 #[allow(dead_code)]
@@ -1383,7 +1404,7 @@ async fn post_telegram_test(State(state): State<AppState>) -> Json<ActionRespons
     }
     match crate::telegram::send_message(
         &cfg,
-        "🛡️ <b>AegisDNS Test Message</b>\n\nYour Telegram integration is working correctly!",
+        crate::telegram::format_test_message(),
     ).await {
         Ok(()) => Json(ActionResponse { success: true, message: "Test message sent".into() }),
         Err(e) => Json(ActionResponse { success: false, message: e }),

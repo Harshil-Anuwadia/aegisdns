@@ -19,6 +19,7 @@ import {
   Timer,
   Workflow,
   Monitor,
+  Smartphone,
   RefreshCw,
   ArrowUpRight,
 } from "lucide-react";
@@ -50,6 +51,7 @@ export const navigation = [
     group: "Infrastructure",
     items: [
       { id: "devices", label: "Devices", icon: Monitor },
+      { id: "mobile", label: "Mobile access", icon: Smartphone },
       { id: "upstream", label: "Upstream DNS", icon: Globe2 },
       { id: "actions", label: "Custom actions", icon: Workflow },
       { id: "diagnostics", label: "Diagnostics", icon: Terminal },

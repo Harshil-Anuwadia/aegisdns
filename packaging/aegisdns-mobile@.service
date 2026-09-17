@@ -1,0 +1,19 @@
+[Unit]
+Description=AegisDNS mobile access request
+Requires=aegisdns-mobile.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/local/libexec/aegisdns-mobile-helper
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true

@@ -1,0 +1,10 @@
+[Unit]
+Description=AegisDNS mobile access control socket
+
+[Socket]
+ListenStream=127.0.0.1:5382
+Accept=yes
+MaxConnections=8
+
+[Install]
+WantedBy=sockets.target

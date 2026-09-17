@@ -88,6 +88,12 @@ ssh -L 5380:127.0.0.1:5380 user@dns-host
 
 Then open `http://localhost:5380` on your own computer.
 
+For phone access, open **Infrastructure → Mobile access** in the dashboard and
+select **Enable mobile access**. Installer-managed Linux hosts configure a
+private Tailscale Serve address and show the exact HTTPS URL to copy into the
+AegisDNS Android app. The route is available only to devices in the same
+tailnet; this feature never enables Tailscale Funnel.
+
 ### Verify before changing network DNS
 
 Using `dig`, check both transports on the DNS host:

@@ -47,6 +47,7 @@ const Alerts = lazy(() =>
 const Settings = lazy(() =>
   import("./pages/Infrastructure").then((m) => ({ default: m.Settings })),
 );
+const MobileAccess = lazy(() => import("./pages/MobileAccess"));
 const pages: Record<string, React.ComponentType> = {
   overview: Overview,
   traffic: Traffic,
@@ -61,6 +62,7 @@ const pages: Record<string, React.ComponentType> = {
   diagnostics: Diagnostics,
   alerts: Alerts,
   settings: Settings,
+  mobile: MobileAccess,
   actions: Actions,
   support: Support,
 };

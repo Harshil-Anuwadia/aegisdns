@@ -10,6 +10,7 @@ mod telegram;
 mod dhcp;
 mod auth;
 mod tailscale;
+mod mobile;
 mod upstream;
 mod relationships;
 mod privacy;

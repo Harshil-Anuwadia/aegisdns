@@ -439,7 +439,7 @@ function TelegramForm({ initial }: { initial: Telegram }) {
       )}
       <Field
         label="Risk threshold"
-        hint="Send domain alerts at or above this heuristic score."
+        hint="Alert when a domain reaches this heuristic score. Messages include the device, outcome, and detection signals."
       >
         <input
           name="threshold"
@@ -452,7 +452,7 @@ function TelegramForm({ initial }: { initial: Telegram }) {
       </Field>
       <Toggle
         label="Notify on blocked queries"
-        description="Can produce frequent messages on busy networks."
+        description="Report policy blocks. Repeated copies of the same event are quieted for five minutes."
         checked={blocked}
         onChange={setBlocked}
       />

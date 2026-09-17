@@ -235,7 +235,7 @@ class SetupTests(unittest.TestCase):
     def test_uninstall_leaves_foreign_cli_in_place(self):
         setup.CLI_LINK.parent.mkdir(); setup.CLI_LINK.write_text('someone else')
         self.flow('uninstall').uninstall()
-        self.assertFalse(any('rm' in c for c in self.runner.calls))
+        self.assertFalse(any('rm' in c and str(setup.CLI_LINK) in c for c in self.runner.calls))
 
     def test_desktop_requires_explicit_unattended_acknowledgement(self):
         self.runner.desktop=True
