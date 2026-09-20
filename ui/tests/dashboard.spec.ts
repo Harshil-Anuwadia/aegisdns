@@ -107,21 +107,59 @@ test("disabled remote favicon lookup shows domain names without icon requests", 
   await expect(page.locator(".domain-icon")).toHaveCount(0);
   expect(faviconRequests).toBe(0);
 });
-test("query filtering, pause, detail rule and export", async ({ page }) => {
+test("small phones keep dense pages inside the viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile");
+  await page.setViewportSize({ width: 320, height: 700 });
+  await mockApi(page);
+  for (const route of [
+    "traffic",
+    "network",
+    "privacy",
+    "settings",
+    "support",
+  ]) {
+    await page.goto(`/#${route}`);
+    await expect(page.locator("main h1")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  }
+  await page.goto("/#traffic");
+  await expect(page.locator("tbody tr")).toHaveCount(10);
+  await expect(
+    page.locator("tbody td[data-label='Domain']").first(),
+  ).toBeVisible();
+});
+test("query filtering, pause, detail rule and export", async ({
+  page,
+}, testInfo) => {
   const writes = await mockApi(page);
   await page.goto("/#traffic");
   await page
     .getByRole("combobox", { name: "Query status" })
     .selectOption("blocked");
-  await expect(page.locator("tbody tr")).toHaveCount(17);
+  await expect(page.locator("tbody tr")).toHaveCount(
+    testInfo.project.name === "mobile" ? 10 : 17,
+  );
   await page.getByRole("button", { name: "Pause stream" }).click();
   await expect(
     page.getByRole("button", { name: "Resume stream" }),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Inspect tracker.example.com", exact: true })
-    .first()
-    .click();
+  if (testInfo.project.name === "mobile") {
+    await page
+      .getByRole("button", { name: "tracker.example.com", exact: true })
+      .first()
+      .click();
+  } else {
+    await page
+      .getByRole("button", { name: "Inspect tracker.example.com", exact: true })
+      .first()
+      .click();
+  }
   await page.getByRole("button", { name: "Apply rule" }).click();
   await expect.poll(() => writes.length).toBe(1);
   expect(writes[0]).toMatchObject({

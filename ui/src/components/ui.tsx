@@ -7,6 +7,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  Children,
   useState,
   useEffect,
   useId,
@@ -393,9 +394,20 @@ export function Table({
    *  several regions on a page could not tell them apart. */
   label?: string;
 }) {
+  const labelledRows = Children.map(children, (row) => {
+    if (!isValidElement<{ children?: ReactNode }>(row)) return row;
+    const cells = Children.map(row.props.children, (cell, index) => {
+      if (
+        !isValidElement<{ children?: ReactNode; "data-label"?: string }>(cell)
+      )
+        return cell;
+      return cloneElement(cell, { "data-label": headers[index] || "" });
+    });
+    return cloneElement(row, undefined, cells);
+  });
   return (
     <div
-      className="table-scroll"
+      className="table-scroll responsive-table"
       tabIndex={0}
       role="region"
       aria-label={label || "Data table"}
@@ -410,7 +422,7 @@ export function Table({
             ))}
           </tr>
         </thead>
-        <tbody>{children}</tbody>
+        <tbody>{labelledRows}</tbody>
       </table>
     </div>
   );

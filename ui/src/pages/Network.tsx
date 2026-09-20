@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { number, timestamp, useApi } from "../api";
 import type { Graph, GraphNode } from "../types";
+import { useCompactLayout } from "../responsive";
 import {
   Button,
   Empty,
@@ -34,6 +35,7 @@ type RelationshipNode = FlowNode<{
   label: string;
   kind: string;
   count: number;
+  compact: boolean;
 }>;
 function NodeView({ data }: NodeProps<RelationshipNode>) {
   const Icon =
@@ -44,19 +46,26 @@ function NodeView({ data }: NodeProps<RelationshipNode>) {
         : Globe2;
   return (
     <div className={`relationship-node kind-${data.kind}`}>
-      <Handle type="target" position={Position.Left} />
+      <Handle
+        type="target"
+        position={data.compact ? Position.Top : Position.Left}
+      />
       <Icon size={17} />
       <div>
         <small>{data.kind}</small>
         <strong title={data.label}>{data.label}</strong>
       </div>
       <span>{number(data.count)}</span>
-      <Handle type="source" position={Position.Right} />
+      <Handle
+        type="source"
+        position={data.compact ? Position.Bottom : Position.Right}
+      />
     </div>
   );
 }
 const nodeTypes = { relationship: NodeView };
 export default function Network() {
+  const compact = useCompactLayout();
   const initial =
     new URLSearchParams(location.hash.split("?")[1]).get("domain") || "";
   const [input, setInput] = useState(initial),
@@ -160,6 +169,13 @@ export default function Network() {
       currentX += lanes * 280 + 200;
     }
 
+    let currentY = 0;
+    const mobileOffsets = new Map<number, number>();
+    for (let c = 0; c <= 4; c++) {
+      mobileOffsets.set(c, currentY);
+      currentY += (columns.get(c) || 0) * 82 + 95;
+    }
+
     const columnCounters = new Map<number, number>();
     const nodes = nodeCols.map(({ n, column }) => {
       const row = columnCounters.get(column) || 0;
@@ -169,8 +185,10 @@ export default function Network() {
         id: n.id,
         type: "relationship",
         position: {
-          x: (columnOffsets.get(column) || 0) + lane * 280,
-          y: (row % 15) * 85,
+          x: compact ? 0 : (columnOffsets.get(column) || 0) + lane * 280,
+          y: compact
+            ? (mobileOffsets.get(column) || 0) + row * 82
+            : (row % 15) * 85,
         },
         data: {
           label: n.label,
@@ -178,6 +196,7 @@ export default function Network() {
           count: edges
             .filter((e) => e.source === n.id || e.target === n.id)
             .reduce((a, e) => a + e.count, 0),
+          compact,
         },
         selected: selected?.id === n.id,
       };
@@ -206,7 +225,7 @@ export default function Network() {
         labelBgStyle: { fill: "var(--surface)" },
       })),
     };
-  }, [query.data, selected, device]);
+  }, [query.data, selected, device, compact]);
   // Derived from the rendered edge set, not the raw response: with a device
   // focus applied the two differ, and the inspector used to report (and link
   // to) neighbours that had been filtered off the canvas.
@@ -338,12 +357,15 @@ export default function Network() {
                 // nodes exist belongs in the key; minCount and limit were
                 // missing, so tightening them left the viewport framed on the
                 // old, larger graph.
-                key={`${domain}-${hours}-${device}-${minCount}-${limit}`}
+                key={`${domain}-${hours}-${device}-${minCount}-${limit}-${compact}`}
                 nodes={layout.nodes}
                 edges={layout.edges}
                 nodeTypes={nodeTypes}
                 fitView
-                fitViewOptions={{ padding: 0.12, maxZoom: 0.85 }}
+                fitViewOptions={{
+                  padding: compact ? 0.2 : 0.12,
+                  maxZoom: compact ? 1 : 0.85,
+                }}
                 minZoom={0.12}
                 maxZoom={1.5}
                 nodesDraggable={false}

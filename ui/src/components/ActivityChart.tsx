@@ -10,6 +10,7 @@ import {
 import { useApi } from "../api";
 import type { Telemetry } from "../types";
 import { Empty, ErrorState, Skeleton } from "./ui";
+
 export default function ActivityChart() {
   const query = useApi<Telemetry>("/telemetry", 5000);
   if (query.error)
@@ -72,7 +73,9 @@ export default function ActivityChart() {
               border: "1px solid var(--border)",
               borderRadius: 8,
               color: "var(--text-primary)",
+              pointerEvents: "none",
             }}
+            wrapperStyle={{ pointerEvents: "none" }}
             labelFormatter={(n) => `${Math.abs(Number(n))} seconds ago`}
           />
           <Area
@@ -81,7 +84,7 @@ export default function ActivityChart() {
             stroke="var(--info)"
             strokeWidth={2}
             fill="url(#traffic-fill)"
-            isAnimationActive={false}
+            isAnimationActive={true}
           />
           <Area
             type="monotone"
@@ -89,14 +92,14 @@ export default function ActivityChart() {
             stroke="var(--danger)"
             strokeWidth={1.5}
             fill="transparent"
-            isAnimationActive={false}
+            isAnimationActive={true}
           />
           <Area
             type="monotone"
             dataKey="Cached"
             stroke="var(--cached)"
             fill="transparent"
-            isAnimationActive={false}
+            isAnimationActive={true}
           />
         </AreaChart>
       </ResponsiveContainer>

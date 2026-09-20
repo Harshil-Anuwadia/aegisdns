@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, Pause, Play, Search, SlidersHorizontal } from "lucide-react";
 import { useLive } from "../live";
 import { api, number, send, time, useApi } from "../api";
 import { DomainIcon } from "../components/DomainIcon";
 import type { Device, QueryEvent } from "../types";
+import { useCompactLayout } from "../responsive";
 import {
   AsyncForm,
   Badge,
@@ -22,6 +23,7 @@ import {
 export default function Traffic() {
   const live = useLive(),
     devices = useApi<Device[]>("/devices");
+  const compact = useCompactLayout();
   const params = new URLSearchParams(location.hash.split("?")[1]);
   const [search, setSearch] = useState(params.get("domain") || ""),
     [status, setStatus] = useState(params.get("status") || ""),
@@ -45,7 +47,9 @@ export default function Traffic() {
         ? [...rows].reverse()
         : rows;
   }, [events, search, status, device, sort]);
-  const pages = Math.max(1, Math.ceil(filtered.length / 30)),
+  const pageSize = compact ? 10 : 30;
+  useEffect(() => setPage(0), [pageSize]);
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize)),
     safePage = Math.min(page, pages - 1);
   return (
     <>
@@ -115,6 +119,7 @@ export default function Traffic() {
             ))}
           </select>
           <select
+            className="sort-control"
             aria-label="Sort queries"
             value={sort}
             onChange={(e) => {
@@ -163,37 +168,39 @@ export default function Traffic() {
               "Details",
             ]}
           >
-            {filtered.slice(safePage * 30, (safePage + 1) * 30).map((q, i) => (
-              <tr key={`${q.timestamp}-${q.domain}-${i}`}>
-                <td className="mono muted">{time(q.timestamp)}</td>
-                <td>
-                  <button
-                    className="plain-button domain-link"
-                    onClick={() => setSelected(q)}
-                  >
-                    <DomainIcon domain={q.domain} size="compact" />
-                    {q.domain}
-                  </button>
-                </td>
-                <td>
-                  {devices.data?.find((d) => d.ip === q.client_ip)?.name ||
-                    "Unregistered"}
-                </td>
-                <td className="mono muted">{q.client_ip}</td>
-                <td>
-                  <Status value={q.status} />
-                </td>
-                <td>
-                  <Button
-                    variant="ghost"
-                    aria-label={`Inspect ${q.domain}`}
-                    onClick={() => setSelected(q)}
-                  >
-                    <SlidersHorizontal size={15} />
-                  </Button>
-                </td>
-              </tr>
-            ))}
+            {filtered
+              .slice(safePage * pageSize, (safePage + 1) * pageSize)
+              .map((q, i) => (
+                <tr key={`${q.timestamp}-${q.domain}-${i}`}>
+                  <td className="mono muted">{time(q.timestamp)}</td>
+                  <td>
+                    <button
+                      className="plain-button domain-link"
+                      onClick={() => setSelected(q)}
+                    >
+                      <DomainIcon domain={q.domain} size="compact" />
+                      {q.domain}
+                    </button>
+                  </td>
+                  <td>
+                    {devices.data?.find((d) => d.ip === q.client_ip)?.name ||
+                      "Unregistered"}
+                  </td>
+                  <td className="mono muted">{q.client_ip}</td>
+                  <td>
+                    <Status value={q.status} />
+                  </td>
+                  <td>
+                    <Button
+                      variant="ghost"
+                      aria-label={`Inspect ${q.domain}`}
+                      onClick={() => setSelected(q)}
+                    >
+                      <SlidersHorizontal size={15} />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
           </Table>
         ) : (
           <Empty
