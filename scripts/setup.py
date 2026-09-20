@@ -552,6 +552,25 @@ class Setup:
         )
         return True
 
+    def _ensure_docker_running(self):
+        """Start the Docker Engine if it is installed but not yet running (e.g. right after a
+        fresh installation via get.docker.com which does not auto-start the service)."""
+        if WINDOWS or not shutil.which('systemctl'):
+            return
+        result = self.runner.run(
+            ['sudo', '-n', 'systemctl', 'is-active', '--quiet', 'docker'],
+            check=False, timeout=10,
+        )
+        if result == 0:
+            return  # Already running
+        self.ui.detail('Starting Docker Engine…')
+        self.runner.run(['sudo', '-n', 'systemctl', 'enable', '--now', 'docker'], check=False, timeout=30)
+        # Give the daemon a moment to create its socket
+        for _ in range(10):
+            time.sleep(1)
+            if Path('/var/run/docker.sock').exists():
+                break
+
     def connect_docker(self):
         self.dependency('docker', 'https://get.docker.com')
         result = self.runner.run(['docker', 'info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
@@ -560,8 +579,11 @@ class Setup:
                 raise SetupError('Start Docker Desktop, wait for its Linux engine, and retry.')
             # Before escalating to sudo docker, try to fix group / socket access automatically.
             self.sudo()
+            # 1. Make sure Docker Engine is actually running (may not be after a fresh install).
+            self._ensure_docker_running()
+            # 2. Fix group membership and socket permissions for this session.
             self._fix_docker_access()
-            # Re-try as the regular user first (socket fix may be enough without sudo docker).
+            # 3. Re-try as the regular user first (socket fix may be enough without sudo docker).
             result = self.runner.run(['docker', 'info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
             if not isinstance(result, str) or not result or 'error' in result.lower():
                 # Fall back to sudo docker as a last resort.
