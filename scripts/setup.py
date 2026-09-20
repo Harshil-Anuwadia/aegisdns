@@ -517,17 +517,58 @@ class Setup:
         prefix = ['sudo', '-n'] if self.args.yes else ['sudo']
         self.runner.run(prefix + ['sh', target], interactive=False, timeout=900, activity=f'Installing {name}', preserve_tty=True)
 
+    def _fix_docker_access(self):
+        """Auto-add the current user to the docker group and fix socket permissions so the
+        installer works without a full logout/login cycle."""
+        user = os.environ.get('USER') or os.environ.get('LOGNAME') or ''
+        if not user:
+            try:
+                import pwd
+                user = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                pass
+        if not user:
+            return False
+
+        # Check if user is already in the docker group (may just need socket tweak)
+        try:
+            import grp
+            docker_gid = grp.getgrnam('docker').gr_gid
+            if docker_gid in os.getgroups():
+                # Already in group — socket must be the issue; fix permissions only
+                self.ui.detail('Fixing Docker socket permissions so this session can reach it…')
+                self.runner.run(['sudo', '-n', 'chmod', '666', '/var/run/docker.sock'], check=False, timeout=10)
+                return True
+        except (KeyError, Exception):
+            pass
+
+        # Add user to docker group and open socket for this session
+        self.ui.detail(f'Adding {user} to the docker group and opening the socket for this session…')
+        self.runner.run(['sudo', '-n', 'usermod', '-aG', 'docker', user], check=False, timeout=15)
+        self.runner.run(['sudo', '-n', 'chmod', '666', '/var/run/docker.sock'], check=False, timeout=10)
+        self.ui.warn(
+            f'{user} has been added to the docker group. '
+            'Log out and back in after this install so future sessions use the group instead of the socket workaround.'
+        )
+        return True
+
     def connect_docker(self):
         self.dependency('docker', 'https://get.docker.com')
         result = self.runner.run(['docker', 'info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
         if not isinstance(result, str) or not result or 'error' in result.lower():
             if WINDOWS:
                 raise SetupError('Start Docker Desktop, wait for its Linux engine, and retry.')
+            # Before escalating to sudo docker, try to fix group / socket access automatically.
             self.sudo()
-            self.docker = ['sudo', '-n', 'docker']
-            result = self.runner.run(self.docker + ['info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
-            if not result:
-                raise SetupError('Docker Engine is not reachable. Start it (usually sudo systemctl start docker), check the Docker context, then retry.')
+            self._fix_docker_access()
+            # Re-try as the regular user first (socket fix may be enough without sudo docker).
+            result = self.runner.run(['docker', 'info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
+            if not isinstance(result, str) or not result or 'error' in result.lower():
+                # Fall back to sudo docker as a last resort.
+                self.docker = ['sudo', '-n', 'docker']
+                result = self.runner.run(self.docker + ['info', '--format', '{{.OperatingSystem}}'], capture=True, check=False, timeout=25)
+                if not result:
+                    raise SetupError('Docker Engine is not reachable. Start it (usually sudo systemctl start docker), check the Docker context, then retry.')
         endpoint = os.environ.get('DOCKER_HOST') or self.runner.run(self.docker + ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], capture=True, timeout=20)
         if not endpoint.startswith(('unix://', 'npipe://')):
             raise SetupError('Use a local Docker Engine socket. Remote/TCP Docker contexts cannot safely configure this host’s DNS.')
