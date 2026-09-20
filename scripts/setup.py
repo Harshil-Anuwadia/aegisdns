@@ -565,11 +565,18 @@ class Setup:
             return  # Already running
         self.ui.detail('Starting Docker Engine…')
         self.runner.run(['sudo', '-n', 'systemctl', 'enable', '--now', 'docker'], check=False, timeout=30)
-        # Give the daemon a moment to create its socket
-        for _ in range(10):
+        # Wait until Docker is actually accepting connections (not just socket file existence).
+        # Fresh installs can take several seconds for the daemon to initialise fully.
+        for _ in range(30):
             time.sleep(1)
-            if Path('/var/run/docker.sock').exists():
-                break
+            if not Path('/var/run/docker.sock').exists():
+                continue
+            probe = self.runner.run(
+                ['sudo', '-n', 'docker', 'info', '--format', '{{.OperatingSystem}}'],
+                capture=True, check=False, timeout=5,
+            )
+            if isinstance(probe, str) and probe:
+                return  # Daemon is up and responding
 
     def connect_docker(self):
         self.dependency('docker', 'https://get.docker.com')
