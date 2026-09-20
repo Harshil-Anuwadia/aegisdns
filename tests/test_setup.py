@@ -213,6 +213,21 @@ class SetupTests(unittest.TestCase):
         with self.assertRaisesRegex(setup.SetupError,'Rootless'): self.flow().install()
         self.assertFalse((self.root/'config.json').exists())
 
+    def test_docker_access_repair_keeps_sudo_on_authenticated_terminal(self):
+        flow = self.flow()
+        with patch.dict(os.environ, {'USER': 'alice'}), \
+             patch('os.getgroups', return_value=[]), \
+             patch('shutil.which', side_effect=lambda name: f'/usr/bin/{name}'):
+            flow._fix_docker_access()
+        privileged = [
+            options for call, options in zip(self.runner.calls, self.runner.call_options)
+            if call[:2] == ['sudo', '-n']
+        ]
+        self.assertTrue(privileged)
+        self.assertTrue(all(options.get('preserve_tty') for options in privileged))
+        self.assertTrue(any('setfacl' in call for call in self.runner.calls))
+        self.assertFalse(any('chmod' in call and '666' in call for call in self.runner.calls))
+
     def test_owned_compose_overrides_are_preserved(self):
         self.runner.owner=self.root
         overlay=self.root/'docker-compose.extra.yml';overlay.touch()
