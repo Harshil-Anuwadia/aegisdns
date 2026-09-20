@@ -3,7 +3,7 @@ import { mockApi } from "./fixtures";
 
 test("funding page uses the verified sponsor destination without automatic outbound requests", async ({
   page,
-}) => {
+}, testInfo) => {
   const external: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).origin !== "http://127.0.0.1:4173")
@@ -11,9 +11,17 @@ test("funding page uses the verified sponsor destination without automatic outbo
   });
   const writes = await mockApi(page);
   await page.goto("/#overview");
-  await page
-    .getByRole("link", { name: "Support AegisDNS", exact: true })
-    .click();
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "Search and commands" }).click();
+    await page
+      .getByRole("textbox", { name: "Search commands" })
+      .fill("support");
+    await page.getByRole("button", { name: "Open Support AegisDNS" }).click();
+  } else {
+    await page
+      .getByRole("link", { name: "Support AegisDNS", exact: true })
+      .click();
+  }
   await expect(page).toHaveURL(/#support$/);
   const sponsor = page.getByRole("link", { name: "Sponsor on GitHub" });
   await expect(sponsor).toHaveAttribute(

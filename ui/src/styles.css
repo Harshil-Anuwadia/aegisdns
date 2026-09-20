@@ -41,20 +41,87 @@
   color: var(--text-primary);
 }
 
-.mobile-access-panel { display: grid; gap: 18px; align-items: start; }
-.mobile-access-panel h2 { margin: 0 0 6px; font-size: 1.18rem; }
-.mobile-access-panel p { margin: 0; color: var(--text-muted); line-height: 1.6; }
-.mobile-access-mark { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 14px; color: var(--accent); background: var(--surface-elevated); }
-.mobile-access-url { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-elevated); }
-.mobile-access-url > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.connection-steps { list-style: none; padding: 0; margin: 22px 0; display: grid; gap: 16px; }
-.connection-steps li { display: flex; gap: 12px; align-items: flex-start; }
-.connection-steps li > span { width: 26px; height: 26px; flex: 0 0 26px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--text-muted); font: 12px var(--font-mono); }
-.connection-steps strong, .connection-steps small { display: block; }
-.connection-steps small { margin-top: 3px; color: var(--text-muted); line-height: 1.45; }
+.mobile-access-panel {
+  display: grid;
+  gap: 18px;
+  align-items: start;
+}
+.mobile-access-panel h2 {
+  margin: 0 0 6px;
+  font-size: 1.18rem;
+}
+.mobile-access-panel p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.mobile-access-mark {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--accent);
+  background: var(--surface-elevated);
+}
+.mobile-access-url {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+}
+.mobile-access-url > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-steps {
+  list-style: none;
+  padding: 0;
+  margin: 22px 0;
+  display: grid;
+  gap: 16px;
+}
+.connection-steps li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.connection-steps li > span {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  font: 12px var(--font-mono);
+}
+.connection-steps strong,
+.connection-steps small {
+  display: block;
+}
+.connection-steps small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
 @media (max-width: 680px) {
-  .mobile-access-url { align-items: stretch; flex-wrap: wrap; }
-  .mobile-access-url > span { flex-basis: 100%; padding-bottom: 4px; }
+  .mobile-access-url {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .mobile-access-url > span {
+    flex-basis: 100%;
+    padding-bottom: 4px;
+  }
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -172,7 +239,9 @@ svg {
   z-index: 100;
   background: var(--accent);
   color: var(--accent-text);
-  transition: top 0.3s ease, box-shadow 0.3s ease;
+  transition:
+    top 0.3s ease,
+    box-shadow 0.3s ease;
 }
 .skip-link:focus {
   top: 20px;
@@ -213,7 +282,9 @@ svg {
   flex-direction: column;
   padding: 28px 16px 16px;
   overflow-y: auto;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  transition:
+    border-color 0.3s ease,
+    box-shadow 0.3s ease;
 }
 .sidebar:hover {
   border-right-color: var(--accent);
@@ -234,7 +305,9 @@ svg {
   width: 36px;
   height: 42px;
   color: var(--accent);
-  transition: transform 0.3s ease, color 0.3s ease;
+  transition:
+    transform 0.3s ease,
+    color 0.3s ease;
 }
 .brand:hover .brand-mark {
   transform: scale(1.1) rotate(-8deg);
@@ -431,7 +504,10 @@ kbd {
   margin-right: 10px;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
-  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
 }
 .search-trigger:hover {
   background: var(--surface-hover);
@@ -950,7 +1026,6 @@ tbody tr:hover {
   gap: 16px;
   min-height: 190px;
   justify-content: center;
-  animation: fadeInUp 0.6s ease-out;
 }
 .empty > svg {
   color: var(--text-muted);
@@ -1002,7 +1077,8 @@ tbody tr:hover {
   }
 }
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -1070,7 +1146,9 @@ tbody tr:hover {
 .dialog-header .button {
   padding: 4px;
   min-height: 28px;
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition:
+    background 0.2s ease,
+    transform 0.2s ease;
 }
 .dialog-header .button:hover {
   background: var(--surface-hover);
@@ -1195,7 +1273,9 @@ textarea {
   min-width: 0;
   max-width: 100%;
   width: 100%;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 .field select:focus-visible,
 .field textarea:focus-visible,
@@ -1219,7 +1299,10 @@ select,
   background-repeat: no-repeat;
   background-position: right 16px center;
   background-size: 14px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-position 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background-position 0.2s ease;
 }
 select:focus-visible,
 .field select:focus-visible,
@@ -1288,7 +1371,9 @@ input[type="checkbox"] {
   position: relative;
   border: 1px solid var(--text-muted);
   flex-shrink: 0;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
 }
 .switch:after {
   content: "";
@@ -1299,7 +1384,9 @@ input[type="checkbox"] {
   position: absolute;
   top: 3px;
   left: 3px;
-  transition: transform 0.2s ease, background 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    background 0.2s ease;
 }
 .toggle-field input:checked + .switch {
   background: var(--accent);
@@ -1789,7 +1876,9 @@ input[type="checkbox"] {
   text-align: left;
   font: inherit;
   cursor: pointer;
-  transition: color 0.2s ease, transform 0.2s ease;
+  transition:
+    color 0.2s ease,
+    transform 0.2s ease;
 }
 .plain-button:hover {
   color: var(--accent);

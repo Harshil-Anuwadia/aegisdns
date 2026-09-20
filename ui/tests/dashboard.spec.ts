@@ -416,7 +416,7 @@ test("blocklist, device, and action creation", async ({ page }) => {
 
 test("SSE events arrive and the session buffer remains bounded", async ({
   page,
-}) => {
+}, testInfo) => {
   await mockApi(page, { "/recent": [] });
   const event = {
     domain: "stream.example.com",
@@ -438,10 +438,15 @@ test("SSE events arrive and the session buffer remains bounded", async ({
   );
   await page.goto("/#traffic");
   await expect(page.getByText("500 matching events")).toBeVisible();
-  await expect(page.locator("tbody tr")).toHaveCount(30);
-  await expect(page.getByText("Page 1 of 17")).toBeVisible();
+  const compact = testInfo.project.name === "mobile";
+  await expect(page.locator("tbody tr")).toHaveCount(compact ? 10 : 30);
+  await expect(
+    page.getByText(compact ? "Page 1 of 50" : "Page 1 of 17"),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(page.getByText("Page 2 of 17")).toBeVisible();
+  await expect(
+    page.getByText(compact ? "Page 2 of 50" : "Page 2 of 17"),
+  ).toBeVisible();
 });
 
 test("loading, history errors and keyboard focus remain usable", async ({
