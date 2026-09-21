@@ -33,7 +33,7 @@ subtle = "2.6"
 
 socket2 = "0.6"
 ipnet.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 libc = "0.2"
 
 [dev-dependencies]

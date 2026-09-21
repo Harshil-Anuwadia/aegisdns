@@ -179,7 +179,8 @@ impl DnsProxy {
             RData::PTR(name)=>edges.push(linked_observation(&owner,"domain","points_to",&config::canonical_domain(&name.0.to_ascii()),"domain")),
             RData::TLSA(tlsa)=>{
                 use sha2::{Digest,Sha256};
-                let fingerprint=format!("sha256:{:x}",Sha256::digest(&tlsa.cert_data));
+                let digest=Sha256::digest(&tlsa.cert_data);
+                let fingerprint=format!("sha256:{}",crate::actions::encode_hex(&digest));
                 edges.push(linked_observation(&owner,"domain","certificate_association",&fingerprint,"certificate"));
             }
             RData::SVCB(svcb)=>{let target=config::canonical_domain(&svcb.target_name.to_ascii());if !target.is_empty(){edges.push(linked_observation(&owner,"domain","service_target",&target,"domain"));}}
