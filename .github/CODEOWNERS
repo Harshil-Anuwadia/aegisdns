@@ -1,8 +1,6 @@
-# Default reviewer for the project.
-* @Harshil-Anuwadia
-
 # Security-sensitive and deployment code.
-/.github/ @Harshil-Anuwadia
+/.github/workflows/ @Harshil-Anuwadia
+/.github/SECURITY.md @Harshil-Anuwadia
 /crates/daemon/ @Harshil-Anuwadia
 /crates/resolver/ @Harshil-Anuwadia
 /scripts/ @Harshil-Anuwadia
