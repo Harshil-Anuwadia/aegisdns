@@ -55,9 +55,19 @@ pub fn invalidate(domain: &str) {
 }
 
 /// Hash a raw action token with SHA-256. Store the returned hex string in the DB, never the raw token.
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 pub fn hash_token(raw: &str) -> String {
     let digest = Sha256::digest(raw.as_bytes());
-    format!("{:x}", digest)
+    encode_hex(&digest)
 }
 
 /// Constant-time comparison of a raw token against a stored SHA-256 hash.
@@ -219,6 +229,13 @@ pub async fn execute(action: &CustomAction, params: &std::collections::HashMap<S
 }
 
 #[cfg(test)] mod tests {
+    #[test] fn hashes_tokens_as_lowercase_sha256_hex() {
+        assert_eq!(
+            super::hash_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+    }
+
     #[test] fn reject_legacy_shell_and_unauthenticated_actions() {
         assert!(super::validate("shell",Some("echo {value}"),None,None,Some(&"x".repeat(32))).is_err());
         // Request values must never become argv for a general-purpose
