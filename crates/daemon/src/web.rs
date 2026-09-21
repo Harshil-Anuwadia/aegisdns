@@ -183,14 +183,17 @@ pub async fn start_action_server(
     analytics: Arc<AnalyticsDb>,
     host_ip: &str,
 ) -> anyhow::Result<()> {
-    use axum::{extract::Host, response::IntoResponse};
+    use axum::response::IntoResponse;
     let execution_limits = Arc::new(tokio::sync::Semaphore::new(8));
     let admission_limits = Arc::new(tokio::sync::Semaphore::new(32));
-    let app = Router::new().fallback(post(move |Host(host): Host,
+    let app = Router::new().fallback(post(move |
         headers: axum::http::HeaderMap, Json(params): Json<HashMap<String,String>>| {
         let analytics = analytics.clone(); let execution_limits = execution_limits.clone();
         async move {
-            let host = config::canonical_domain(host.split(':').next().unwrap_or(&host));
+            let Some(host) = headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok()) else {
+                return (axum::http::StatusCode::BAD_REQUEST,"A valid Host header is required").into_response();
+            };
+            let host = config::canonical_domain(host.split(':').next().unwrap_or(host));
             let Some(action) = crate::actions::get_action_for_domain_db(&host, &analytics).await else {
                 return (axum::http::StatusCode::NOT_FOUND,"Unknown action").into_response();
             };
